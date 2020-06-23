@@ -2,6 +2,8 @@ package azuresecrets
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -13,6 +15,8 @@ import (
 	"github.com/Azure/azure-sdk-for-go/services/graphrbac/1.6/graphrbac"
 	"github.com/Azure/azure-sdk-for-go/services/preview/authorization/mgmt/2018-01-01-preview/authorization"
 	"github.com/Azure/go-autorest/autorest"
+	azureadal "github.com/Azure/go-autorest/autorest/adal"
+	"github.com/Azure/go-autorest/autorest/azure/auth"
 	"github.com/Azure/go-autorest/autorest/to"
 	log "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/vault/sdk/helper/logging"
@@ -211,7 +215,8 @@ func (m *mockProvider) UpdateApplicationPasswordCredentials(ctx context.Context,
 func (m *mockProvider) ListApplicationPasswordCredentials(ctx context.Context, applicationObjectID string) (result graphrbac.PasswordCredentialListResult, err error) {
 	var creds []graphrbac.PasswordCredential
 	for keyID := range m.passwords {
-		creds = append(creds, graphrbac.PasswordCredential{KeyID: &keyID})
+		kCopy := keyID
+		creds = append(creds, graphrbac.PasswordCredential{KeyID: &kCopy})
 	}
 
 	return graphrbac.PasswordCredentialListResult{
@@ -266,6 +271,20 @@ func (m *mockProvider) GetGroup(ctx context.Context, objectID string) (result gr
 	}
 
 	return g, nil
+}
+
+func (m *mockProvider) GetToken(c auth.ClientCredentialsConfig) (azureadal.Token, error) {
+	expires := time.Now().Add(1 * time.Minute)
+
+	jwt := []byte(fmt.Sprintf("{\"exp\":%v,\"aud\":\"audience\"}", expires.Unix()))
+	header := base64.StdEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte("header"))
+	payload := base64.StdEncoding.WithPadding(base64.NoPadding).EncodeToString(jwt)
+	signature := base64.StdEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte("signature"))
+	return azureadal.Token{
+		AccessToken: fmt.Sprintf("%v.%v.%v", header, payload, signature),
+		ExpiresIn:   json.Number(fmt.Sprintf("%v", expires.Sub(time.Now()).Truncate(time.Second))),
+		ExpiresOn:   json.Number(fmt.Sprintf("%v", expires.Unix())),
+	}, nil
 }
 
 // ListGroups gets list of groups for the current tenant.

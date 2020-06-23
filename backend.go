@@ -45,6 +45,7 @@ func backend() *azureSecretBackend {
 		Paths: framework.PathAppend(
 			pathsRole(&b),
 			[]*framework.Path{
+				pathAccessToken(&b),
 				pathConfig(&b),
 				pathServicePrincipal(&b),
 			},

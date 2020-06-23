@@ -66,7 +66,6 @@ func TestSP_WAL_Cleanup(t *testing.T) {
 	// verify basic cred issuance
 	t.Run("Role assign fail", func(t *testing.T) {
 		name := generateUUID()
-		testRoleCreate(t, b, s, name, testRole)
 
 		// create a short timeout to short-circuit the retry process and trigger the
 		// deadline error
@@ -74,8 +73,9 @@ func TestSP_WAL_Cleanup(t *testing.T) {
 		defer cancel()
 
 		resp, err := b.HandleRequest(ctx, &logical.Request{
-			Operation: logical.ReadOperation,
-			Path:      "creds/" + name,
+			Operation: logical.CreateOperation,
+			Path:      fmt.Sprintf("roles/%s", name),
+			Data:      testRole,
 			Storage:   s,
 		})
 
@@ -321,9 +321,9 @@ func TestStaticSPRead(t *testing.T) {
 }
 
 func TestSPRevoke(t *testing.T) {
-	b, s := getTestBackend(t, true)
 
 	t.Run("roles", func(t *testing.T) {
+		b, s := getTestBackend(t, true)
 		testRoleCreate(t, b, s, "test_role", testRole)
 
 		resp, err := b.HandleRequest(context.Background(), &logical.Request{
@@ -362,6 +362,7 @@ func TestSPRevoke(t *testing.T) {
 	})
 
 	t.Run("groups", func(t *testing.T) {
+		b, s := getTestBackend(t, true)
 		testRoleCreate(t, b, s, "test_role", testGroupRole)
 
 		resp, err := b.HandleRequest(context.Background(), &logical.Request{

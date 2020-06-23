@@ -321,6 +321,15 @@ func groupObjectIDs(groups []*AzureGroup) []string {
 	return groupIDs
 }
 
+func roleIDs(roles []*AzureRole) []string {
+	groupIDs := make([]string, 0, len(roles))
+	for _, role := range roles {
+		groupIDs = append(groupIDs, role.RoleID)
+
+	}
+	return groupIDs
+}
+
 // search for roles by name
 func (c *client) findRoles(ctx context.Context, roleName string) ([]authorization.RoleDefinition, error) {
 	return c.provider.ListRoles(ctx, fmt.Sprintf("subscriptions/%s", c.settings.SubscriptionID), fmt.Sprintf("roleName eq '%s'", roleName))
