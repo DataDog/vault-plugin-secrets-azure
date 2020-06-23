@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/errwrap"
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/helper/jsonutil"
+	"github.com/hashicorp/vault/sdk/helper/locksutil"
 	"github.com/hashicorp/vault/sdk/logical"
 )
 
@@ -24,13 +25,21 @@ const (
 
 // roleEntry is a Vault role construct that maps to Azure roles or Applications
 type roleEntry struct {
-	CredentialType      int           `json:"credential_type"` // Reserved. Always SP at this time.
-	AzureRoles          []*AzureRole  `json:"azure_roles"`
-	AzureGroups         []*AzureGroup `json:"azure_groups"`
-	ApplicationID       string        `json:"application_id"`
-	ApplicationObjectID string        `json:"application_object_id"`
-	TTL                 time.Duration `json:"ttl"`
-	MaxTTL              time.Duration `json:"max_ttl"`
+	CredentialType      int                `json:"credential_type"` // Reserved. Always SP at this time.
+	AzureRoles          []*AzureRole       `json:"azure_roles"`
+	AzureGroups         []*AzureGroup      `json:"azure_groups"`
+	ApplicationID       string             `json:"application_id"`
+	ApplicationObjectID string             `json:"application_object_id"`
+	ApplicationType     string             `json:"application_type"`
+	ServicePrincipalID  string             `json:"service_principal_id"`
+	TTL                 time.Duration      `json:"ttl"`
+	MaxTTL              time.Duration      `json:"max_ttl"`
+	Credentials         *ClientCredentials `json:"credentials"`
+}
+
+type ClientCredentials struct {
+	KeyId    string `json:"key_id"`
+	Password string `json:"password"`
 }
 
 // AzureRole is an Azure Role (https://docs.microsoft.com/en-us/azure/role-based-access-control/overview) applied
@@ -82,11 +91,19 @@ func pathsRole(b *azureSecretBackend) []*framework.Path {
 					Description: "Maximum time a service principal. If not set or set to 0, will use system default.",
 				},
 			},
-			Callbacks: map[logical.Operation]framework.OperationFunc{
-				logical.ReadOperation:   b.pathRoleRead,
-				logical.CreateOperation: b.pathRoleUpdate,
-				logical.UpdateOperation: b.pathRoleUpdate,
-				logical.DeleteOperation: b.pathRoleDelete,
+			Operations: map[logical.Operation]framework.OperationHandler{
+				logical.ReadOperation: &framework.PathOperation{
+					Callback: b.pathRoleRead,
+				},
+				logical.CreateOperation: &framework.PathOperation{
+					Callback: b.pathRoleUpdate,
+				},
+				logical.UpdateOperation: &framework.PathOperation{
+					Callback: b.pathRoleUpdate,
+				},
+				logical.DeleteOperation: &framework.PathOperation{
+					Callback: b.pathRoleDelete,
+				},
 			},
 			HelpSynopsis:    roleHelpSyn,
 			HelpDescription: roleHelpDesc,
@@ -94,8 +111,10 @@ func pathsRole(b *azureSecretBackend) []*framework.Path {
 		},
 		{
 			Pattern: "roles/?",
-			Callbacks: map[logical.Operation]framework.OperationFunc{
-				logical.ListOperation: b.pathRoleList,
+			Operations: map[logical.Operation]framework.OperationHandler{
+				logical.ListOperation: &framework.PathOperation{
+					Callback: b.pathRoleList,
+				},
 			},
 			HelpSynopsis:    roleListHelpSyn,
 			HelpDescription: roleListHelpDesc,
@@ -132,6 +151,11 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 
 	// load or create role
 	name := d.Get("name").(string)
+
+	lock := locksutil.LockForKey(b.appLocks, name)
+	lock.Lock()
+	defer lock.Unlock()
+
 	role, err := getRole(ctx, name, req.Storage)
 	if err != nil {
 		return nil, errwrap.Wrapf("error reading role: {{err}}", err)
@@ -174,6 +198,9 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 			return nil, errwrap.Wrapf("error loading Application: {{err}}", err)
 		}
 		role.ApplicationID = to.String(app.AppID)
+		role.ApplicationType = "static"
+	} else {
+		role.ApplicationType = "dynamic"
 	}
 
 	// Parse the Azure roles
@@ -274,8 +301,21 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 		return logical.ErrorResponse("either Azure role definitions, group definitions, or an Application Object ID must be provided"), nil
 	}
 
+	var r *roleEntry
+	// Only add credentials if this is a new role or a role that existed before access token support was available
+	if req.Operation == logical.CreateOperation || role.Credentials == nil {
+		if role.ApplicationType == "static" {
+			r, err = b.createStaticSPSecret(ctx, client, name, role)
+		} else {
+			r, err = b.createSPSecret(ctx, client, name, role)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// save role
-	err = saveRole(ctx, req.Storage, role, name)
+	err = saveRole(ctx, req.Storage, r, name)
 	if err != nil {
 		return nil, errwrap.Wrapf("error storing role: {{err}}", err)
 	}
@@ -301,7 +341,11 @@ func (b *azureSecretBackend) pathRoleRead(ctx context.Context, req *logical.Requ
 	data["max_ttl"] = r.MaxTTL / time.Second
 	data["azure_roles"] = r.AzureRoles
 	data["azure_groups"] = r.AzureGroups
-	data["application_object_id"] = r.ApplicationObjectID
+	aoid := ""
+	if r.ApplicationType == "static" {
+		aoid = r.ApplicationObjectID
+	}
+	data["application_object_id"] = aoid
 
 	return &logical.Response{
 		Data: data,
@@ -320,12 +364,37 @@ func (b *azureSecretBackend) pathRoleList(ctx context.Context, req *logical.Requ
 func (b *azureSecretBackend) pathRoleDelete(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
 
-	err := req.Storage.Delete(ctx, fmt.Sprintf("%s/%s", rolesStoragePath, name))
+	lock := locksutil.LockForKey(b.appLocks, name)
+	lock.Lock()
+	defer lock.Unlock()
+
+	role, err := getRole(ctx, name, req.Storage)
+	if err != nil {
+		return nil, errwrap.Wrapf(fmt.Sprintf("unable to get role %s: {{err}}", name), err)
+	}
+	if role == nil {
+		return nil, nil
+	}
+
+	var resp *logical.Response
+	if role.ApplicationType == "static" {
+		resp, err = b.staticSPRemove(ctx, req, role)
+		if err != nil {
+			return &logical.Response{Warnings: []string{"error removing existing Azure app password"}}, nil
+		}
+	} else {
+		resp, err = b.spRemove(ctx, req, role)
+		if err != nil {
+			return &logical.Response{Warnings: []string{"error removing dynamic Azure service principal"}}, nil
+		}
+	}
+
+	err = req.Storage.Delete(ctx, fmt.Sprintf("%s/%s", rolesStoragePath, name))
 	if err != nil {
 		return nil, errwrap.Wrapf("error deleting role: {{err}}", err)
 	}
 
-	return nil, nil
+	return resp, nil
 }
 
 func (b *azureSecretBackend) pathRoleExistenceCheck(ctx context.Context, req *logical.Request, d *framework.FieldData) (bool, error) {
