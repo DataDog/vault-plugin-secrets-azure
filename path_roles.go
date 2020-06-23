@@ -302,7 +302,8 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 	}
 
 	var r *roleEntry
-	if req.Operation == logical.CreateOperation {
+	// Only add credentials if this is a new role or a role that existed before access token support was available
+	if req.Operation == logical.CreateOperation || role.Credentials == nil {
 		if role.ApplicationType == "static" {
 			r, err = b.createStaticSPSecret(ctx, client, name, role)
 		} else {

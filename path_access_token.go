@@ -55,6 +55,10 @@ func (b *azureSecretBackend) pathAccessTokenRead(ctx context.Context, request *l
 		return logical.ErrorResponse("role '%s' cannot generate access tokens (has secret type %s)", roleName, role.CredentialType), nil
 	}
 
+	if role.Credentials == nil {
+		return logical.ErrorResponse("role '%s' configured before plugin supported access tokens (update or recreate role)", roleName), nil
+	}
+
 	return b.secretAccessTokenResponse(ctx, request.Storage, role)
 }
 
