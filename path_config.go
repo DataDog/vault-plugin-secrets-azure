@@ -60,11 +60,19 @@ func pathConfig(b *azureSecretBackend) *framework.Path {
 				Description: "Name of the password policy to use to generate passwords for dynamic credentials.",
 			},
 		},
-		Callbacks: map[logical.Operation]framework.OperationFunc{
-			logical.ReadOperation:   b.pathConfigRead,
-			logical.CreateOperation: b.pathConfigWrite,
-			logical.UpdateOperation: b.pathConfigWrite,
-			logical.DeleteOperation: b.pathConfigDelete,
+		Operations: map[logical.Operation]framework.OperationHandler{
+			logical.ReadOperation: &framework.PathOperation{
+				Callback: b.pathConfigRead,
+			},
+			logical.CreateOperation: &framework.PathOperation{
+				Callback: b.pathConfigWrite,
+			},
+			logical.UpdateOperation: &framework.PathOperation{
+				Callback: b.pathConfigWrite,
+			},
+			logical.DeleteOperation: &framework.PathOperation{
+				Callback: b.pathConfigDelete,
+			},
 		},
 		ExistenceCheck:  b.pathConfigExistenceCheck,
 		HelpSynopsis:    confHelpSyn,

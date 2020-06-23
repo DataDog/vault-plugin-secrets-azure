@@ -82,11 +82,19 @@ func pathsRole(b *azureSecretBackend) []*framework.Path {
 					Description: "Maximum time a service principal. If not set or set to 0, will use system default.",
 				},
 			},
-			Callbacks: map[logical.Operation]framework.OperationFunc{
-				logical.ReadOperation:   b.pathRoleRead,
-				logical.CreateOperation: b.pathRoleUpdate,
-				logical.UpdateOperation: b.pathRoleUpdate,
-				logical.DeleteOperation: b.pathRoleDelete,
+			Operations: map[logical.Operation]framework.OperationHandler{
+				logical.ReadOperation: &framework.PathOperation{
+					Callback: b.pathRoleRead,
+				},
+				logical.CreateOperation: &framework.PathOperation{
+					Callback: b.pathRoleUpdate,
+				},
+				logical.UpdateOperation: &framework.PathOperation{
+					Callback: b.pathRoleUpdate,
+				},
+				logical.DeleteOperation: &framework.PathOperation{
+					Callback: b.pathRoleDelete,
+				},
 			},
 			HelpSynopsis:    roleHelpSyn,
 			HelpDescription: roleHelpDesc,
@@ -94,8 +102,10 @@ func pathsRole(b *azureSecretBackend) []*framework.Path {
 		},
 		{
 			Pattern: "roles/?",
-			Callbacks: map[logical.Operation]framework.OperationFunc{
-				logical.ListOperation: b.pathRoleList,
+			Operations: map[logical.Operation]framework.OperationHandler{
+				logical.ListOperation: &framework.PathOperation{
+					Callback: b.pathRoleList,
+				},
 			},
 			HelpSynopsis:    roleListHelpSyn,
 			HelpDescription: roleListHelpDesc,
