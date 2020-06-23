@@ -226,9 +226,9 @@ func TestStaticSPRead(t *testing.T) {
 }
 
 func TestSPRevoke(t *testing.T) {
-	b, s := getTestBackend(t, true)
 
 	t.Run("roles", func(t *testing.T) {
+		b, s := getTestBackend(t, true)
 		testRoleCreate(t, b, s, "test_role", testRole)
 
 		resp, err := b.HandleRequest(context.Background(), &logical.Request{
@@ -267,6 +267,7 @@ func TestSPRevoke(t *testing.T) {
 	})
 
 	t.Run("groups", func(t *testing.T) {
+		b, s := getTestBackend(t, true)
 		testRoleCreate(t, b, s, "test_role", testGroupRole)
 
 		resp, err := b.HandleRequest(context.Background(), &logical.Request{

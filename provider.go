@@ -6,7 +6,9 @@ import (
 	"github.com/Azure/azure-sdk-for-go/services/graphrbac/1.6/graphrbac"
 	"github.com/Azure/azure-sdk-for-go/services/preview/authorization/mgmt/2018-01-01-preview/authorization"
 	"github.com/Azure/go-autorest/autorest"
+	azureadal "github.com/Azure/go-autorest/autorest/adal"
 	"github.com/Azure/go-autorest/autorest/azure/auth"
+	azureauth "github.com/Azure/go-autorest/autorest/azure/auth"
 	"github.com/hashicorp/vault/sdk/helper/useragent"
 )
 
@@ -19,6 +21,7 @@ type AzureProvider interface {
 	ADGroupsClient
 	RoleAssignmentsClient
 	RoleDefinitionsClient
+	AccessTokenClient
 }
 
 type ApplicationsClient interface {
@@ -55,6 +58,10 @@ type RoleAssignmentsClient interface {
 type RoleDefinitionsClient interface {
 	ListRoles(ctx context.Context, scope string, filter string) ([]authorization.RoleDefinition, error)
 	GetRoleByID(ctx context.Context, roleID string) (result authorization.RoleDefinition, err error)
+}
+
+type AccessTokenClient interface {
+	GetToken(c azureauth.ClientCredentialsConfig) (azureadal.Token, error)
 }
 
 // provider is a concrete implementation of AzureProvider. In most cases it is a simple passthrough
@@ -244,4 +251,20 @@ func (p *provider) ListGroups(ctx context.Context, filter string) (result []grap
 	}
 
 	return page.Values(), nil
+}
+
+// GetToken fetches a new Azure OAuth2 bearer token from the given clients
+// credentials and tenant.
+func (p *provider) GetToken(c azureauth.ClientCredentialsConfig) (azureadal.Token, error) {
+	t, err := c.ServicePrincipalToken()
+	if err != nil {
+		return azureadal.Token{}, err
+	}
+
+	err = t.Refresh()
+	if err != nil {
+		return azureadal.Token{}, err
+	}
+
+	return t.Token(), nil
 }
