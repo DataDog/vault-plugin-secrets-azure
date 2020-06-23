@@ -9,14 +9,22 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/services/preview/authorization/mgmt/2018-01-01-preview/authorization"
 	"github.com/Azure/go-autorest/autorest/to"
+	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/vault-plugin-secrets-azure/api"
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/helper/jsonutil"
+	"github.com/hashicorp/vault/sdk/helper/locksutil"
 	"github.com/hashicorp/vault/sdk/logical"
 )
 
 const (
 	rolesStoragePath = "roles"
+
+	// applicationTypeStatic for when a role is configured with an application_object_id (i.e. the application is managed externally)
+	applicationTypeStatic = "static"
+
+	// applicationTypeDynamic for when a role is configured without an application_object_id
+	applicationTypeDynamic = "dynamic"
 
 	credentialTypeSP = 0
 )
@@ -31,6 +39,15 @@ type roleEntry struct {
 	TTL                 time.Duration `json:"ttl"`
 	MaxTTL              time.Duration `json:"max_ttl"`
 	PermanentlyDelete   bool          `json:"permanently_delete"`
+
+	ApplicationType    string             `json:"application_type"`
+	ServicePrincipalID string             `json:"service_principal_id"`
+	Credentials        *ClientCredentials `json:"credentials"`
+}
+
+type ClientCredentials struct {
+	KeyId    string `json:"key_id"`
+	Password string `json:"password"`
 }
 
 // AzureRole is an Azure Role (https://docs.microsoft.com/en-us/azure/role-based-access-control/overview) applied
@@ -40,6 +57,8 @@ type AzureRole struct {
 	RoleName string `json:"role_name"` // e.g. Owner
 	RoleID   string `json:"role_id"`   // e.g. /subscriptions/e0a207b2-.../providers/Microsoft.Authorization/roleDefinitions/de139f84-...
 	Scope    string `json:"scope"`     // e.g. /subscriptions/e0a207b2-...
+
+	RoleAssignmentID string `json:"role_assignment_id,omitempty"` // e.g. /subscriptions/e0a207b2-.../providers/Microsoft.Authorization/roleAssignments/de139f84-...
 }
 
 // AzureGroup is an Azure Active Directory Group
@@ -120,13 +139,14 @@ func pathsRole(b *azureSecretBackend) []*framework.Path {
 //   Given just role name, a search will be performed and if exactly one match is found,
 //   that role will be used.
 
-//   Azure groups are checked for existence. The Azure groups lookup step will allow the
-//   operator to provide a groups name or ID. ID is unambigious and will be used if provided.
-//   Given just group name, a search will be performed and if exactly one match is found,
-//   that group will be used.
+//	Azure groups are checked for existence. The Azure groups lookup step will allow the
+//	operator to provide a groups name or ID. ID is unambigious and will be used if provided.
+//	Given just group name, a search will be performed and if exactly one match is found,
+//	that group will be used.
 //
 // Static Service Principal:
-//   The provided Application Object ID is checked for existence.
+//
+//	The provided Application Object ID is checked for existence.
 func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	var resp *logical.Response
 
@@ -146,9 +166,20 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 
 	// load or create role
 	name := d.Get("name").(string)
+
+	lock := locksutil.LockForKey(b.appLocks, name)
+	lock.Lock()
+	defer lock.Unlock()
+
 	role, err := getRole(ctx, name, req.Storage)
 	if err != nil {
 		return nil, fmt.Errorf("error reading role: %w", err)
+	}
+
+	var appObjectID string
+	appObjectIDRaw, appObjectIDRawOk := d.GetOk("application_object_id")
+	if appObjectIDRawOk {
+		appObjectID = appObjectIDRaw.(string)
 	}
 
 	if role == nil {
@@ -156,7 +187,22 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 			return nil, errors.New("role entry not found during update operation")
 		}
 		role = &roleEntry{
-			CredentialType: credentialTypeSP,
+			ApplicationObjectID: appObjectID,
+			AzureGroups:         []*AzureGroup{},
+			AzureRoles:          []*AzureRole{},
+			CredentialType:      credentialTypeSP,
+		}
+
+		if role.ApplicationObjectID == "" {
+			role.ApplicationType = applicationTypeDynamic
+		} else {
+			role.ApplicationType = applicationTypeStatic
+		}
+	} else {
+		// Ensure the application_object_id doesn't change. Effectively also ensure that static and dynamic
+		// roles remain as static or dynamic, respectively.
+		if appObjectIDRawOk && appObjectID != role.ApplicationObjectID {
+			return logical.ErrorResponse("the role's application_object_id cannot be updated/removed (recreate role)"), nil
 		}
 	}
 
@@ -196,12 +242,13 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 		}
 		role.ApplicationID = to.String(app.AppID)
 
-		if role.PermanentlyDelete {
+		if role.PermanentlyDelete && role.ApplicationType == applicationTypeStatic {
 			return logical.ErrorResponse("permanently_delete must be false if application_object_id is provided"), nil
 		}
 	}
 
 	// Parse the Azure roles
+	var requestedRoles []*AzureRole
 	if roles, ok := d.GetOk("azure_roles"); ok {
 		parsedRoles := make([]*AzureRole, 0) // non-nil to avoid a "missing roles" error later
 
@@ -209,10 +256,11 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 		if err != nil {
 			return logical.ErrorResponse("error parsing Azure roles '%s': %s", roles.(string), err.Error()), nil
 		}
-		role.AzureRoles = parsedRoles
+		requestedRoles = parsedRoles
 	}
 
 	// Parse the Azure groups
+	var requestedGroups []*AzureGroup
 	if groups, ok := d.GetOk("azure_groups"); ok {
 		parsedGroups := make([]*AzureGroup, 0) // non-nil to avoid a "missing groups" error later
 
@@ -220,12 +268,12 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 		if err != nil {
 			return logical.ErrorResponse("error parsing Azure groups '%s': %s", groups.(string), err.Error()), nil
 		}
-		role.AzureGroups = parsedGroups
+		requestedGroups = parsedGroups
 	}
 
 	// update and verify Azure roles, including looking up each role by ID or name.
 	roleSet := make(map[string]bool)
-	for _, r := range role.AzureRoles {
+	for _, r := range requestedRoles {
 		var roleDef authorization.RoleDefinition
 		if r.RoleID != "" {
 			roleDef, err = client.provider.GetRoleDefinitionByID(ctx, r.RoleID)
@@ -262,7 +310,7 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 
 	// update and verify Azure groups, including looking up each group by ID or name.
 	groupSet := make(map[string]bool)
-	for _, r := range role.AzureGroups {
+	for _, r := range requestedGroups {
 		var groupDef api.Group
 		if r.ObjectID != "" {
 			groupDef, err = client.provider.GetGroup(ctx, r.ObjectID)
@@ -294,8 +342,85 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 		groupSet[r.ObjectID] = true
 	}
 
-	if role.ApplicationObjectID == "" && len(role.AzureRoles) == 0 && len(role.AzureGroups) == 0 {
+	if role.ApplicationObjectID == "" && len(requestedRoles) == 0 && len(requestedGroups) == 0 {
 		return logical.ErrorResponse("either Azure role definitions, group definitions, or an Application Object ID must be provided"), nil
+	}
+
+	if role.ApplicationType == applicationTypeStatic && role.ApplicationID == "" {
+		app, err := client.provider.GetApplication(ctx, role.ApplicationObjectID)
+		if err != nil {
+			return nil, fmt.Errorf("error loading Application: %w", err)
+		}
+		role.ApplicationID = to.String(app.AppID)
+	}
+
+	if role.ApplicationType == applicationTypeDynamic {
+		walID := ""
+		if role.Credentials == nil {
+			var err error
+			walID, err = b.createSPSecret(ctx, req.Storage, client, role)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		// Pre-generate UUIDs to be provided to assignRoles so we can rollback if we need to
+		var assignmentIDs []string
+
+		for i := 0; i < len(requestedRoles); i++ {
+			assignmentID, err := uuid.GenerateUUID()
+			if err != nil {
+				return nil, err
+			}
+			assignmentIDs = append(assignmentIDs, assignmentID)
+		}
+
+		// Write a second WAL entry in case the Role assignments don't complete
+		rWALID, err := framework.PutWAL(ctx, req.Storage, walAppRoleAssignment, &walAppRoleAssign{
+			SpID:          role.ServicePrincipalID,
+			AssignmentIDs: assignmentIDs,
+			AzureRoles:    requestedRoles,
+			Expiration:    time.Now().Add(maxWALAge),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("error writing WAL: %w", err)
+		}
+
+		err, warn := b.configureRoles(ctx, client, role, requestedRoles, assignmentIDs)
+		if err != nil {
+			return nil, err
+		}
+		if warn != nil {
+			resp.AddWarning(warn.Error())
+		}
+
+		err, warn = b.configureGroups(ctx, client, role, requestedGroups)
+		if err != nil {
+			return nil, err
+		}
+		if warn != nil {
+			resp.AddWarning(warn.Error())
+		}
+
+		if walID != "" {
+			// SP is fully created so delete the WAL
+			if err := framework.DeleteWAL(ctx, req.Storage, walID); err != nil {
+				return nil, fmt.Errorf("error deleting WAL: %w", err)
+			}
+		}
+
+		if err := framework.DeleteWAL(ctx, req.Storage, rWALID); err != nil {
+			return nil, fmt.Errorf("error deleting role assignment WAL: %w", err)
+		}
+	} else if role.ApplicationType == applicationTypeStatic {
+		if role.Credentials == nil {
+			err = b.createStaticSPSecret(ctx, client, role)
+			if err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		return nil, fmt.Errorf("unknown role ApplicationType \"%v\"", role.ApplicationType)
 	}
 
 	// save role
@@ -307,7 +432,52 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 	return resp, nil
 }
 
+func (b *azureSecretBackend) configureGroups(ctx context.Context, client *client, role *roleEntry, requestedGroups []*AzureGroup) (err error, warn error) {
+	groupsToAdd := groupSetDifference(requestedGroups, role.AzureGroups)
+	groupsToRemove := groupSetDifference(role.AzureGroups, requestedGroups)
+
+	err = client.addGroupMemberships(ctx, role.ServicePrincipalID, groupsToAdd)
+	if err != nil {
+		return
+	}
+
+	warn = client.removeGroupMemberships(ctx, role.ServicePrincipalID, groupsToRemove)
+	if warn != nil {
+		return
+	}
+
+	role.AzureGroups = requestedGroups
+	return
+}
+
+func (b *azureSecretBackend) configureRoles(ctx context.Context, client *client, role *roleEntry, requestedRoles []*AzureRole, assignmentIDs []string) (err error, warn error) {
+	rolesToAdd := roleSetDifference(requestedRoles, role.AzureRoles)
+	rolesToRemove := roleSetDifference(role.AzureRoles, requestedRoles)
+
+	_, err = client.assignRoles(ctx, role.ServicePrincipalID, rolesToAdd, assignmentIDs)
+	if err != nil {
+		return
+	}
+
+	var assignmentIDsToRemove []string
+	for _, roleToRemove := range rolesToRemove {
+		if roleToRemove != nil && roleToRemove.RoleAssignmentID != "" {
+			assignmentIDsToRemove = append(assignmentIDsToRemove, roleToRemove.RoleAssignmentID)
+		}
+	}
+
+	warn = client.unassignRoles(ctx, assignmentIDsToRemove)
+	if warn != nil {
+		return
+	}
+
+	role.AzureRoles = requestedRoles
+	return
+}
+
 func (b *azureSecretBackend) pathRoleRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	var data = make(map[string]interface{})
+
 	name := d.Get("name").(string)
 
 	config, err := b.getConfig(ctx, req.Storage)
@@ -328,15 +498,22 @@ func (b *azureSecretBackend) pathRoleRead(ctx context.Context, req *logical.Requ
 		return nil, nil
 	}
 
+	data["ttl"] = r.TTL / time.Second
+	data["max_ttl"] = r.MaxTTL / time.Second
+	for _, ar := range r.AzureRoles {
+		ar.RoleAssignmentID = ""
+	}
+	data["azure_roles"] = r.AzureRoles
+	data["azure_groups"] = r.AzureGroups
+	aoid := ""
+	if r.ApplicationType == applicationTypeStatic {
+		aoid = r.ApplicationObjectID
+	}
+	data["application_object_id"] = aoid
+	data["permanently_delete"] = r.PermanentlyDelete
+
 	resp := &logical.Response{
-		Data: map[string]interface{}{
-			"ttl":                   r.TTL / time.Second,
-			"max_ttl":               r.MaxTTL / time.Second,
-			"azure_roles":           r.AzureRoles,
-			"azure_groups":          r.AzureGroups,
-			"application_object_id": r.ApplicationObjectID,
-			"permanently_delete":    r.PermanentlyDelete,
-		},
+		Data: data,
 	}
 	return resp, nil
 }
@@ -353,12 +530,40 @@ func (b *azureSecretBackend) pathRoleList(ctx context.Context, req *logical.Requ
 func (b *azureSecretBackend) pathRoleDelete(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
 
-	err := req.Storage.Delete(ctx, fmt.Sprintf("%s/%s", rolesStoragePath, name))
+	lock := locksutil.LockForKey(b.appLocks, name)
+	lock.Lock()
+	defer lock.Unlock()
+
+	role, err := getRole(ctx, name, req.Storage)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get role %s: %w", name, err)
+	}
+	if role == nil {
+		return nil, nil
+	}
+
+	var resp *logical.Response
+	switch role.ApplicationType {
+	case applicationTypeStatic:
+		resp, err = b.staticSPRemove(ctx, req, role)
+		if err != nil {
+			return &logical.Response{Warnings: []string{"error removing existing Azure app password"}}, err
+		}
+	case applicationTypeDynamic:
+		resp, err = b.spRemove(ctx, req, role, role.PermanentlyDelete)
+		if err != nil {
+			return &logical.Response{Warnings: []string{"error removing dynamic Azure service principal"}}, err
+		}
+	default:
+		return nil, fmt.Errorf("unable to delete role, unknown role ApplicationType \"%v\"", role.ApplicationType)
+	}
+
+	err = req.Storage.Delete(ctx, fmt.Sprintf("%s/%s", rolesStoragePath, name))
 	if err != nil {
 		return nil, fmt.Errorf("error deleting role: %w", err)
 	}
 
-	return nil, nil
+	return resp, nil
 }
 
 func (b *azureSecretBackend) pathRoleExistenceCheck(ctx context.Context, req *logical.Request, d *framework.FieldData) (bool, error) {
@@ -396,6 +601,40 @@ func getRole(ctx context.Context, name string, s logical.Storage) (*roleEntry, e
 		return nil, err
 	}
 	return role, nil
+}
+
+func groupSetDifference(a []*AzureGroup, b []*AzureGroup) []*AzureGroup {
+	difference := []*AzureGroup{}
+
+	m := make(map[AzureGroup]bool)
+	for _, bVal := range b {
+		m[*bVal] = true
+	}
+
+	for _, aVal := range a {
+		if _, ok := m[*aVal]; !ok {
+			difference = append(difference, aVal)
+		}
+	}
+
+	return difference
+}
+
+func roleSetDifference(a []*AzureRole, b []*AzureRole) []*AzureRole {
+	difference := []*AzureRole{}
+
+	m := make(map[AzureRole]bool)
+	for _, bVal := range b {
+		m[*bVal] = true
+	}
+
+	for _, aVal := range a {
+		if _, ok := m[*aVal]; !ok {
+			difference = append(difference, aVal)
+		}
+	}
+
+	return difference
 }
 
 const roleHelpSyn = "Manage the Vault roles used to generate Azure credentials."

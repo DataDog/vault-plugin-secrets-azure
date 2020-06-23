@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	multierror "github.com/hashicorp/go-multierror"
+	"github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/mitchellh/mapstructure"
 )
@@ -132,7 +132,7 @@ func (b *azureSecretBackend) rollbackRoleAssignWAL(ctx context.Context, req *log
 	b.Logger().Debug("rolling back role assignments for service principal", "ID", entry.SpID)
 
 	// Return if there aren't any roles to unassign
-	if entry.AzureRoles == nil {
+	if entry.AzureRoles == nil || len(entry.AzureRoles) < 1 {
 		b.Logger().Error("no azure roles associated with role")
 		return nil
 	}

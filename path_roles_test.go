@@ -63,10 +63,9 @@ func TestRoleCreate(t *testing.T) {
 			"group_name": "bam",
 			"object_id": "a6a834a6-36c3-4575-8e2b-05095963d603FAKE_GROUP-bam"
 		}]`),
-			"ttl":                   int64(300),
-			"max_ttl":               int64(3000),
-			"application_object_id": "",
-			"permanently_delete":    true,
+			"ttl":                int64(300),
+			"max_ttl":            int64(3000),
+			"permanently_delete": true,
 		}
 
 		// Verify basic updates of the name role
@@ -85,6 +84,7 @@ func TestRoleCreate(t *testing.T) {
 		assertErrorIsNil(t, err)
 
 		convertRespTypes(resp.Data)
+		spRole2["application_object_id"] = ""
 		equal(t, spRole2, resp.Data)
 	})
 

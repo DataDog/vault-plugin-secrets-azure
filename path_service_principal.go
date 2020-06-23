@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/Azure/go-autorest/autorest/to"
-	uuid "github.com/hashicorp/go-uuid"
+	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/helper/locksutil"
 	"github.com/hashicorp/vault/sdk/logical"
@@ -77,18 +77,79 @@ func (b *azureSecretBackend) pathSPRead(ctx context.Context, req *logical.Reques
 		return logical.ErrorResponse(fmt.Sprintf("role '%s' does not exist", roleName)), nil
 	}
 
-	var resp *logical.Response
+	var secretType string
+	var raIDs []string
+	if role.ApplicationType == applicationTypeDynamic {
+		secretType = SecretTypeSP
+		walID, err := b.createSPSecret(ctx, req.Storage, client, role)
+		if err != nil {
+			return nil, err
+		}
 
-	if role.ApplicationObjectID != "" {
-		resp, err = b.createStaticSPSecret(ctx, client, roleName, role)
+		// Pre-generate UUIDs to be provided to assignRoles so we can rollback if we need to
+		var assignmentIDs []string
+
+		for i := 0; i < len(role.AzureRoles); i++ {
+			assignmentID, err := uuid.GenerateUUID()
+			if err != nil {
+				return nil, err
+			}
+			assignmentIDs = append(assignmentIDs, assignmentID)
+		}
+
+		// Write a second WAL entry in case the Role assignments don't complete
+		rWALID, err := framework.PutWAL(ctx, req.Storage, walAppRoleAssignment, &walAppRoleAssign{
+			SpID:          role.ServicePrincipalID,
+			AssignmentIDs: assignmentIDs,
+			AzureRoles:    role.AzureRoles,
+			Expiration:    time.Now().Add(maxWALAge),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("error writing WAL: %w", err)
+		}
+
+		raIDs, err = client.assignRoles(ctx, role.ServicePrincipalID, role.AzureRoles, assignmentIDs)
+		if err != nil {
+			return nil, err
+		}
+
+		err = client.addGroupMemberships(ctx, role.ServicePrincipalID, role.AzureGroups)
+		if err != nil {
+			return nil, err
+		}
+
+		// SP is fully created so delete the WAL
+		if err := framework.DeleteWAL(ctx, req.Storage, walID); err != nil {
+			return nil, fmt.Errorf("error deleting WAL: %w", err)
+		}
+
+		if err := framework.DeleteWAL(ctx, req.Storage, rWALID); err != nil {
+			return nil, fmt.Errorf("error deleting role assignment WAL: %w", err)
+		}
+	} else if role.ApplicationType == applicationTypeStatic {
+		secretType = SecretTypeStaticSP
+		err = b.createStaticSPSecret(ctx, client, role)
+		if err != nil {
+			return nil, err
+		}
 	} else {
-		resp, err = b.createSPSecret(ctx, req.Storage, client, roleName, role)
+		return nil, fmt.Errorf("unknown role ApplicationType \"%v\"", role.ApplicationType)
 	}
 
-	if err != nil {
-		return nil, err
+	data := map[string]interface{}{
+		"client_id":     role.ApplicationID,
+		"client_secret": role.Credentials.Password,
 	}
-
+	internalData := map[string]interface{}{
+		"app_object_id":        role.ApplicationObjectID,
+		"key_id":               role.Credentials.KeyId,
+		"sp_object_id":         role.ServicePrincipalID,
+		"role_assignment_ids":  raIDs,
+		"group_membership_ids": groupObjectIDs(role.AzureGroups),
+		"role":                 roleName,
+		"permanently_delete":   role.PermanentlyDelete,
+	}
+	resp := b.Secret(secretType).Response(data, internalData)
 	resp.Secret.TTL = role.TTL
 	resp.Secret.MaxTTL = role.MaxTTL
 
@@ -96,13 +157,13 @@ func (b *azureSecretBackend) pathSPRead(ctx context.Context, req *logical.Reques
 }
 
 // createSPSecret generates a new App/Service Principal.
-func (b *azureSecretBackend) createSPSecret(ctx context.Context, s logical.Storage, c *client, roleName string, role *roleEntry) (*logical.Response, error) {
+func (b *azureSecretBackend) createSPSecret(ctx context.Context, s logical.Storage, c *client, role *roleEntry) (string, error) {
 	// Create the App, which is the top level object to be tracked in the secret
 	// and deleted upon revocation. If any subsequent step fails, the App will be
 	// deleted as part of WAL rollback.
 	app, err := c.createApp(ctx)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	appID := to.String(app.AppID)
 	appObjID := to.String(app.ID)
@@ -114,95 +175,42 @@ func (b *azureSecretBackend) createSPSecret(ctx context.Context, s logical.Stora
 		Expiration: time.Now().Add(maxWALAge),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("error writing WAL: %w", err)
+		return "", fmt.Errorf("error writing WAL: %w", err)
 	}
 
 	// Create a service principal associated with the new App
 	spID, password, err := c.createSP(ctx, app, spExpiration)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	// Pre-generate UUIDs to be provided to assignRoles so we can rollback if we need to
-	var assignmentIDs []string
-
-	for i := 0; i < len(role.AzureRoles); i++ {
-		assignmentID, err := uuid.GenerateUUID()
-		if err != nil {
-			return nil, err
-		}
-		assignmentIDs = append(assignmentIDs, assignmentID)
+	role.ApplicationID = appID
+	role.ApplicationObjectID = appObjID
+	role.ServicePrincipalID = spID
+	role.Credentials = &ClientCredentials{
+		Password: password,
 	}
 
-	// Write a second WAL entry in case the Role assignments don't complete
-	rWALID, err := framework.PutWAL(ctx, s, walAppRoleAssignment, &walAppRoleAssign{
-		SpID:          spID,
-		AssignmentIDs: assignmentIDs,
-		AzureRoles:    role.AzureRoles,
-		Expiration:    time.Now().Add(maxWALAge),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error writing WAL: %w", err)
-	}
-
-	// Assign Azure roles to the new SP
-	raIDs, err := c.assignRoles(ctx, spID, role.AzureRoles, assignmentIDs)
-	if err != nil {
-		return nil, err
-	}
-
-	// Assign Azure group memberships to the new SP
-	if err := c.addGroupMemberships(ctx, spID, role.AzureGroups); err != nil {
-		return nil, err
-	}
-
-	// SP is fully created so delete the WALs
-	if err := framework.DeleteWAL(ctx, s, walID); err != nil {
-		return nil, fmt.Errorf("error deleting WAL: %w", err)
-	}
-
-	if err := framework.DeleteWAL(ctx, s, rWALID); err != nil {
-		return nil, fmt.Errorf("error deleting role assignment WAL: %w", err)
-	}
-
-	data := map[string]interface{}{
-		"client_id":     appID,
-		"client_secret": password,
-	}
-	internalData := map[string]interface{}{
-		"app_object_id":        appObjID,
-		"sp_object_id":         spID,
-		"role_assignment_ids":  raIDs,
-		"group_membership_ids": groupObjectIDs(role.AzureGroups),
-		"role":                 roleName,
-		"permanently_delete":   role.PermanentlyDelete,
-	}
-
-	return b.Secret(SecretTypeSP).Response(data, internalData), nil
+	return walID, nil
 }
 
 // createStaticSPSecret adds a new password to the App associated with the role.
-func (b *azureSecretBackend) createStaticSPSecret(ctx context.Context, c *client, roleName string, role *roleEntry) (*logical.Response, error) {
+func (b *azureSecretBackend) createStaticSPSecret(ctx context.Context, c *client, role *roleEntry) error {
 	lock := locksutil.LockForKey(b.appLocks, role.ApplicationObjectID)
 	lock.Lock()
 	defer lock.Unlock()
 
 	keyID, password, err := c.addAppPassword(ctx, role.ApplicationObjectID, spExpiration)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	data := map[string]interface{}{
-		"client_id":     role.ApplicationID,
-		"client_secret": password,
-	}
-	internalData := map[string]interface{}{
-		"app_object_id": role.ApplicationObjectID,
-		"key_id":        keyID,
-		"role":          roleName,
+	role.Credentials = &ClientCredentials{
+		KeyId:    keyID,
+		Password: password,
 	}
 
-	return b.Secret(SecretTypeStaticSP).Response(data, internalData), nil
+	return nil
 }
 
 func (b *azureSecretBackend) spRenew(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
@@ -228,8 +236,6 @@ func (b *azureSecretBackend) spRenew(ctx context.Context, req *logical.Request, 
 }
 
 func (b *azureSecretBackend) spRevoke(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	resp := new(logical.Response)
-
 	appObjectIDRaw, ok := req.Secret.InternalData["app_object_id"]
 	if !ok {
 		return nil, errors.New("internal data 'app_object_id' not found")
@@ -251,22 +257,37 @@ func (b *azureSecretBackend) spRevoke(ctx context.Context, req *logical.Request,
 		permanentlyDelete = permanentlyDeleteRaw.(bool)
 	}
 
-	var raIDs []string
+	var roles []*AzureRole
 	if req.Secret.InternalData["role_assignment_ids"] != nil {
 		for _, v := range req.Secret.InternalData["role_assignment_ids"].([]interface{}) {
-			raIDs = append(raIDs, v.(string))
+			roles = append(roles, &AzureRole{
+				RoleAssignmentID: v.(string),
+			})
 		}
 	}
 
-	var gmIDs []string
+	var groups []*AzureGroup
 	if req.Secret.InternalData["group_membership_ids"] != nil {
 		for _, v := range req.Secret.InternalData["group_membership_ids"].([]interface{}) {
-			gmIDs = append(gmIDs, v.(string))
+			groups = append(groups, &AzureGroup{
+				ObjectID: v.(string),
+			})
 		}
 	}
 
-	if len(gmIDs) != 0 && spObjectID == "" {
-		return nil, errors.New("internal data 'sp_object_id' not found")
+	r := &roleEntry{
+		AzureRoles:          roles,
+		AzureGroups:         groups,
+		ApplicationObjectID: appObjectID,
+		ServicePrincipalID:  spObjectID,
+	}
+
+	return b.spRemove(ctx, req, r, permanentlyDelete)
+}
+
+func (b *azureSecretBackend) spRemove(ctx context.Context, req *logical.Request, role *roleEntry, permanentlyDelete bool) (*logical.Response, error) {
+	if len(role.AzureGroups) != 0 && role.ServicePrincipalID == "" {
+		return nil, errors.New("service principal ID not found")
 	}
 
 	c, err := b.getClient(ctx, req.Storage)
@@ -274,27 +295,36 @@ func (b *azureSecretBackend) spRevoke(ctx context.Context, req *logical.Request,
 		return nil, fmt.Errorf("error during revoke: %w", err)
 	}
 
+	resp := new(logical.Response)
+
+	var assignmentIDsToRemove []string
+	for _, roleToRemove := range role.AzureRoles {
+		if roleToRemove != nil && roleToRemove.RoleAssignmentID != "" {
+			assignmentIDsToRemove = append(assignmentIDsToRemove, roleToRemove.RoleAssignmentID)
+		}
+	}
+
 	// unassigning roles is effectively a garbage collection operation. Errors will be noted but won't fail the
 	// revocation process. Deleting the app, however, *is* required to consider the secret revoked.
-	if err := c.unassignRoles(ctx, raIDs); err != nil {
+	if err := c.unassignRoles(ctx, assignmentIDsToRemove); err != nil {
 		resp.AddWarning(err.Error())
 	}
 
 	// removing group membership is effectively a garbage collection
 	// operation. Errors will be noted but won't fail the revocation process.
 	// Deleting the app, however, *is* required to consider the secret revoked.
-	if err := c.removeGroupMemberships(ctx, spObjectID, gmIDs); err != nil {
+	if err := c.removeGroupMemberships(ctx, role.ServicePrincipalID, role.AzureGroups); err != nil {
 		resp.AddWarning(err.Error())
 	}
 
 	// removing the service principal is effectively a garbage collection
 	// operation. Errors will be noted but won't fail the revocation process.
 	// Deleting the app, however, *is* required to consider the secret revoked.
-	if err := c.deleteServicePrincipal(ctx, spObjectID, permanentlyDelete); err != nil {
+	if err := c.deleteServicePrincipal(ctx, role.ServicePrincipalID, permanentlyDelete); err != nil {
 		resp.AddWarning(err.Error())
 	}
 
-	err = c.deleteApp(ctx, appObjectID, permanentlyDelete)
+	err = c.deleteApp(ctx, role.ApplicationObjectID, permanentlyDelete)
 	return resp, err
 }
 
@@ -306,11 +336,6 @@ func (b *azureSecretBackend) staticSPRevoke(ctx context.Context, req *logical.Re
 
 	appObjectID := appObjectIDRaw.(string)
 
-	c, err := b.getClient(ctx, req.Storage)
-	if err != nil {
-		return nil, fmt.Errorf("error during revoke: %w", err)
-	}
-
 	keyIDRaw, ok := req.Secret.InternalData["key_id"]
 	if !ok {
 		return nil, errors.New("internal data 'key_id' not found")
@@ -320,7 +345,23 @@ func (b *azureSecretBackend) staticSPRevoke(ctx context.Context, req *logical.Re
 	lock.Lock()
 	defer lock.Unlock()
 
-	return nil, c.deleteAppPassword(ctx, appObjectID, keyIDRaw.(string))
+	r := &roleEntry{
+		ApplicationObjectID: appObjectID,
+		Credentials: &ClientCredentials{
+			KeyId: keyIDRaw.(string),
+		},
+	}
+
+	return b.staticSPRemove(ctx, req, r)
+}
+
+func (b *azureSecretBackend) staticSPRemove(ctx context.Context, req *logical.Request, role *roleEntry) (*logical.Response, error) {
+	c, err := b.getClient(ctx, req.Storage)
+	if err != nil {
+		return nil, fmt.Errorf("error during revoke: %w", err)
+	}
+
+	return nil, c.deleteAppPassword(ctx, role.ApplicationObjectID, role.Credentials.KeyId)
 }
 
 const pathServicePrincipalHelpSyn = `

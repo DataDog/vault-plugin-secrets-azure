@@ -12,8 +12,8 @@ import (
 	"github.com/Azure/azure-sdk-for-go/services/preview/authorization/mgmt/2018-01-01-preview/authorization"
 	"github.com/Azure/go-autorest/autorest/azure"
 	"github.com/Azure/go-autorest/autorest/to"
-	multierror "github.com/hashicorp/go-multierror"
-	uuid "github.com/hashicorp/go-uuid"
+	"github.com/hashicorp/go-multierror"
+	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/vault-plugin-secrets-azure/api"
 	"github.com/hashicorp/vault/sdk/logical"
 )
@@ -146,7 +146,7 @@ func (c *client) assignRoles(ctx context.Context, spID string, roles []*AzureRol
 			ra, err := c.provider.CreateRoleAssignment(ctx, role.Scope, assignmentIDs[i],
 				authorization.RoleAssignmentCreateParameters{
 					RoleAssignmentProperties: &authorization.RoleAssignmentProperties{
-						RoleDefinitionID: &role.RoleID,
+						RoleDefinitionID: to.StringPtr(role.RoleID),
 						PrincipalID:      &spID,
 					},
 				})
@@ -156,6 +156,7 @@ func (c *client) assignRoles(ctx context.Context, spID string, roles []*AzureRol
 				return nil, false, nil
 			}
 
+			role.RoleAssignmentID = to.String(ra.ID)
 			return to.String(ra.ID), true, err
 		})
 
@@ -211,11 +212,11 @@ func (c *client) addGroupMemberships(ctx context.Context, spID string, groups []
 // groups. This is a clean-up operation that isn't essential to revocation. As
 // such, an attempt is made to remove all memberships, and not return
 // immediately if there is an error.
-func (c *client) removeGroupMemberships(ctx context.Context, servicePrincipalObjectID string, groupIDs []string) error {
+func (c *client) removeGroupMemberships(ctx context.Context, servicePrincipalObjectID string, groups []*AzureGroup) error {
 	var merr *multierror.Error
 
-	for _, id := range groupIDs {
-		if err := c.provider.RemoveGroupMember(ctx, servicePrincipalObjectID, id); err != nil {
+	for _, group := range groups {
+		if err := c.provider.RemoveGroupMember(ctx, servicePrincipalObjectID, group.ObjectID); err != nil {
 			merr = multierror.Append(merr, fmt.Errorf("error removing group membership: %w", err))
 		}
 	}
@@ -301,9 +302,9 @@ func (b *azureSecretBackend) getClientSettings(ctx context.Context, config *azur
 
 // retry will repeatedly call f until one of:
 //
-//   * f returns true
-//   * the context is cancelled
-//   * 80 seconds elapses. Vault's default request timeout is 90s; we want to expire before then.
+//   - f returns true
+//   - the context is cancelled
+//   - 80 seconds elapses. Vault's default request timeout is 90s; we want to expire before then.
 //
 // Delays are random but will average 5 seconds.
 func retry(ctx context.Context, f func() (interface{}, bool, error)) (interface{}, error) {
