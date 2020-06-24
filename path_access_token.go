@@ -2,16 +2,12 @@ package azuresecrets
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"math"
 	"strings"
-	"time"
 
 	azureadal "github.com/Azure/go-autorest/autorest/adal"
 	azureauth "github.com/Azure/go-autorest/autorest/azure/auth"
+	"github.com/fatih/structs"
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/logical"
 )
@@ -74,48 +70,14 @@ func (b *azureSecretBackend) secretAccessTokenResponse(ctx context.Context, stor
 		return nil, err
 	}
 
-	j, err := decodeAccessToken(token.AccessToken)
-	if err != nil {
-		return nil, err
-	}
-
-	now := time.Now()
-	exp := time.Unix(j.Expiration, 0)
-	ttl := math.Max(exp.Sub(now).Truncate(time.Second).Seconds(), 0)
-
 	// access_tokens are not revocable therefore do not return a framework.Secret (i.e. a lease)
-	return &logical.Response{
-		Data: map[string]interface{}{
-			"token":              token.AccessToken,
-			"token_ttl":          ttl,
-			"expires_at_seconds": j.Expiration,
-		},
-	}, nil
+	return &logical.Response{Data: structsMap(token)}, nil
 }
 
-func decodeAccessToken(token string) (*jws, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return nil, errors.New("invalid JWT from Azure")
-	}
-
-	decodedToken, err := base64.StdEncoding.WithPadding(base64.NoPadding).DecodeString(parts[1])
-	if err != nil {
-		return nil, err
-	}
-
-	j := &jws{}
-	err = json.Unmarshal(decodedToken, j)
-	if err != nil {
-		return nil, err
-	}
-
-	return j, nil
-}
-
-type jws struct {
-	// Expiration is the Epoch when the JWT expires
-	Expiration int64 `json:"exp"`
+func structsMap(s interface{}) map[string]interface{} {
+	t := structs.New(s)
+	t.TagName = "json"
+	return t.Map()
 }
 
 func (b *azureSecretBackend) getToken(ctx context.Context, client *client, c azureauth.ClientCredentialsConfig) (azureadal.Token, error) {
