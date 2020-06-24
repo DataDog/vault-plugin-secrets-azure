@@ -281,9 +281,13 @@ func (m *mockProvider) GetToken(c auth.ClientCredentialsConfig) (azureadal.Token
 	payload := base64.StdEncoding.WithPadding(base64.NoPadding).EncodeToString(jwt)
 	signature := base64.StdEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte("signature"))
 	return azureadal.Token{
-		AccessToken: fmt.Sprintf("%v.%v.%v", header, payload, signature),
-		ExpiresIn:   json.Number(fmt.Sprintf("%v", expires.Sub(time.Now()).Truncate(time.Second))),
-		ExpiresOn:   json.Number(fmt.Sprintf("%v", expires.Unix())),
+		AccessToken:  fmt.Sprintf("%v.%v.%v", header, payload, signature),
+		RefreshToken: "theRefreshToken",
+		ExpiresIn:    json.Number(fmt.Sprintf("%v", expires.Sub(time.Now()).Truncate(time.Second))),
+		ExpiresOn:    json.Number(fmt.Sprintf("%v", expires.Unix())),
+		NotBefore:    "theNotBefore",
+		Resource:     "myResource",
+		Type:         "theType",
 	}, nil
 }
 
