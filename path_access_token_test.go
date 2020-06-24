@@ -2,50 +2,10 @@ package azuresecrets
 
 import (
 	"context"
-	"encoding/base64"
-	"fmt"
-	"github.com/hashicorp/vault/sdk/logical"
-	"reflect"
 	"testing"
-	"time"
-)
 
-func Test_decodeAccessToken(t *testing.T) {
-	nowEpoch := time.Now().Unix()
-	jwt := []byte(fmt.Sprintf("{\"exp\":%v,\"aud\":\"audience\"}", nowEpoch))
-	encodedJwt := base64.StdEncoding.WithPadding(base64.NoPadding).EncodeToString(jwt)
-	tests := []struct {
-		name    string
-		token   string
-		want    *jws
-		wantErr bool
-	}{
-		{
-			name:    "access token decoded",
-			token:   fmt.Sprintf("header.%v.signature", encodedJwt),
-			want:    &jws{Expiration: nowEpoch},
-			wantErr: false,
-		},
-		{
-			name:    "invalid access token",
-			token:   fmt.Sprintf("header.%v", encodedJwt),
-			want:    nil,
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := decodeAccessToken(tt.token)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("decodeAccessToken() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("decodeAccessToken() got = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
+	"github.com/hashicorp/vault/sdk/logical"
+)
 
 func Test_azureSecretBackend_pathAccessTokenRead(t *testing.T) {
 	b, s := getTestBackend(t, true)
@@ -66,16 +26,32 @@ func Test_azureSecretBackend_pathAccessTokenRead(t *testing.T) {
 			t.Fatalf("receive response error: %v", resp.Error())
 		}
 
-		if _, ok := resp.Data["token"]; !ok {
-			t.Fatalf("token not found in response")
+		if _, ok := resp.Data["access_token"]; !ok {
+			t.Fatalf("access_token not found in response")
 		}
 
-		if _, ok := resp.Data["token_ttl"]; !ok {
-			t.Fatalf("token_ttl not found in response")
+		if _, ok := resp.Data["refresh_token"]; !ok {
+			t.Fatalf("refresh_token not found in response")
 		}
 
-		if _, ok := resp.Data["expires_at_seconds"]; !ok {
-			t.Fatalf("expires_at_seconds not found in response")
+		if _, ok := resp.Data["expires_in"]; !ok {
+			t.Fatalf("expires_in not found in response")
+		}
+
+		if _, ok := resp.Data["expires_on"]; !ok {
+			t.Fatalf("expires_on not found in response")
+		}
+
+		if _, ok := resp.Data["not_before"]; !ok {
+			t.Fatalf("not_before not found in response")
+		}
+
+		if _, ok := resp.Data["resource"]; !ok {
+			t.Fatalf("resource not found in response")
+		}
+
+		if _, ok := resp.Data["token_type"]; !ok {
+			t.Fatalf("token_type not found in response")
 		}
 	})
 
