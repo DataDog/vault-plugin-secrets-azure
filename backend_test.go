@@ -286,7 +286,7 @@ func (m *mockProvider) GetToken(c auth.ClientCredentialsConfig) (azureadal.Token
 		ExpiresIn:    json.Number(fmt.Sprintf("%v", expires.Sub(time.Now()).Truncate(time.Second))),
 		ExpiresOn:    json.Number(fmt.Sprintf("%v", expires.Unix())),
 		NotBefore:    "theNotBefore",
-		Resource:     "myResource",
+		Resource:     c.Resource,
 		Type:         "theType",
 	}, nil
 }

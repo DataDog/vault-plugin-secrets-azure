@@ -24,6 +24,11 @@ func pathAccessToken(b *azureSecretBackend) *framework.Path {
 				Type:        framework.TypeLowerCaseString,
 				Description: "Name of the Vault role",
 			},
+			"resource": {
+				Type:        framework.TypeString,
+				Description: "The specific Azure audience of a generated access token",
+				Default:     "https://management.azure.com/",
+			},
 		},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.ReadOperation: &framework.PathOperation{
@@ -37,6 +42,7 @@ func pathAccessToken(b *azureSecretBackend) *framework.Path {
 
 func (b *azureSecretBackend) pathAccessTokenRead(ctx context.Context, request *logical.Request, data *framework.FieldData) (*logical.Response, error) {
 	roleName := data.Get("role").(string)
+	resource := data.Get("resource").(string)
 
 	role, err := getRole(ctx, roleName, request.Storage)
 	if err != nil {
@@ -55,16 +61,17 @@ func (b *azureSecretBackend) pathAccessTokenRead(ctx context.Context, request *l
 		return logical.ErrorResponse("role '%s' configured before plugin supported access tokens (update or recreate role)", roleName), nil
 	}
 
-	return b.secretAccessTokenResponse(ctx, request.Storage, role)
+	return b.secretAccessTokenResponse(ctx, request.Storage, role, resource)
 }
 
-func (b *azureSecretBackend) secretAccessTokenResponse(ctx context.Context, storage logical.Storage, role *roleEntry) (*logical.Response, error) {
+func (b *azureSecretBackend) secretAccessTokenResponse(ctx context.Context, storage logical.Storage, role *roleEntry, resource string) (*logical.Response, error) {
 	client, err := b.getClient(ctx, storage)
 	if err != nil {
 		return nil, err
 	}
 
 	cc := azureauth.NewClientCredentialsConfig(role.ApplicationID, role.Credentials.Password, client.settings.TenantID)
+	cc.Resource = resource
 	token, err := b.getToken(ctx, client, cc)
 	if err != nil {
 		return nil, err
