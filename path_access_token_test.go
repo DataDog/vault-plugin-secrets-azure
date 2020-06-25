@@ -46,12 +46,45 @@ func Test_azureSecretBackend_pathAccessTokenRead(t *testing.T) {
 			t.Fatalf("not_before not found in response")
 		}
 
-		if _, ok := resp.Data["resource"]; !ok {
+		r, ok := resp.Data["resource"]
+		if !ok {
 			t.Fatalf("resource not found in response")
+		}
+		if r != "https://management.azure.com/" {
+			t.Fatalf("resource not equal to requested")
 		}
 
 		if _, ok := resp.Data["token_type"]; !ok {
 			t.Fatalf("token_type not found in response")
+		}
+	})
+
+	t.Run("non default resource token generated", func(t *testing.T) {
+		role := generateUUID()
+		testRoleCreate(t, b, s, role, testStaticSPRole)
+
+		resource := "https://resource.endpoint/"
+		resp, err := b.HandleRequest(context.Background(), &logical.Request{
+			Operation: logical.ReadOperation,
+			Path:      "token/" + role,
+			Data: map[string]interface{}{
+				"resource": resource,
+			},
+			Storage: s,
+		})
+
+		assertErrorIsNil(t, err)
+
+		if resp.IsError() {
+			t.Fatalf("receive response error: %v", resp.Error())
+		}
+
+		r, ok := resp.Data["resource"]
+		if !ok {
+			t.Fatalf("resource not found in response")
+		}
+		if r != resource {
+			t.Fatalf("resource not equal to requested")
 		}
 	})
 
