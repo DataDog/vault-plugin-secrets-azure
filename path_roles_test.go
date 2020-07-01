@@ -62,9 +62,8 @@ func TestRoleCreate(t *testing.T) {
 			"group_name": "bam",
 			"object_id": "a6a834a6-36c3-4575-8e2b-05095963d603FAKE_GROUP-bam"
 		}]`),
-			"ttl":                   int64(300),
-			"max_ttl":               int64(3000),
-			"application_object_id": "",
+			"ttl":     int64(300),
+			"max_ttl": int64(3000),
 		}
 
 		// Verify basic updates of the name role
@@ -83,6 +82,7 @@ func TestRoleCreate(t *testing.T) {
 		assertErrorIsNil(t, err)
 
 		convertRespTypes(resp.Data)
+		spRole2["application_object_id"] = ""
 		equal(t, spRole2, resp.Data)
 	})
 
@@ -103,6 +103,124 @@ func TestRoleCreate(t *testing.T) {
 
 		convertRespTypes(resp.Data)
 		equal(t, spRole1, resp.Data)
+	})
+
+	t.Run("Static SP role application_object_id change", func(t *testing.T) {
+		spRole1 := map[string]interface{}{
+			"application_object_id": "00000000-0000-0000-0000-000000000000",
+			"ttl":                   int64(300),
+			"max_ttl":               int64(3000),
+			"azure_roles":           "[]",
+			"azure_groups":          "[]",
+		}
+
+		spRole1Update := map[string]interface{}{
+			"application_object_id": "00000000-0000-0000-0000-000000000001",
+			"ttl":                   int64(300),
+			"max_ttl":               int64(3000),
+			"azure_roles":           "[]",
+			"azure_groups":          "[]",
+		}
+
+		name := generateUUID()
+		testRoleCreate(t, b, s, name, spRole1)
+
+		resp, err := testRoleRead(t, b, s, name)
+		assertErrorIsNil(t, err)
+
+		convertRespTypes(resp.Data)
+		equal(t, spRole1, resp.Data)
+
+		resp, err = b.HandleRequest(context.Background(), &logical.Request{
+			Operation: logical.CreateOperation,
+			Path:      "roles/" + name,
+			Data:      spRole1Update,
+			Storage:   s,
+		})
+		assertErrorIsNil(t, err)
+		equal(t, true, resp.IsError())
+		equal(t, "the role's application_object_id cannot be updated/removed (recreate role)", resp.Error().Error())
+	})
+
+	t.Run("dynamic SP cannot change to static", func(t *testing.T) {
+		spRole1 := map[string]interface{}{
+			"azure_roles": compactJSON(`[
+				{
+					"role_name": "Contributor",
+					"role_id": "/subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Contributor",
+					"scope":  "test_scope_3"
+				}]`,
+			),
+			"azure_groups":          "[]",
+			"application_object_id": "",
+			"ttl":                   int64(300),
+			"max_ttl":               int64(3000),
+		}
+
+		spRole1Update := map[string]interface{}{
+			"application_object_id": "00000000-0000-0000-0000-000000000001",
+			"azure_roles":           "[]",
+			"azure_groups":          "[]",
+		}
+
+		name := generateUUID()
+		testRoleCreate(t, b, s, name, spRole1)
+
+		resp, err := testRoleRead(t, b, s, name)
+		assertErrorIsNil(t, err)
+
+		convertRespTypes(resp.Data)
+		equal(t, spRole1, resp.Data)
+
+		resp, err = b.HandleRequest(context.Background(), &logical.Request{
+			Operation: logical.CreateOperation,
+			Path:      "roles/" + name,
+			Data:      spRole1Update,
+			Storage:   s,
+		})
+		assertErrorIsNil(t, err)
+		equal(t, true, resp.IsError())
+		equal(t, "the role's application_object_id cannot be updated/removed (recreate role)", resp.Error().Error())
+	})
+
+	t.Run("static SP cannot change to dynamic", func(t *testing.T) {
+		spRole1 := map[string]interface{}{
+			"application_object_id": "00000000-0000-0000-0000-000000000001",
+			"azure_roles":           "[]",
+			"azure_groups":          "[]",
+			"ttl":                   int64(300),
+			"max_ttl":               int64(3000),
+		}
+
+		spRole1Update := map[string]interface{}{
+			"azure_roles": compactJSON(`[
+				{
+					"role_name": "Contributor",
+					"role_id": "/subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Contributor",
+					"scope":  "test_scope_3"
+				}]`,
+			),
+			"azure_groups": "[]",
+		}
+
+		name := generateUUID()
+		testRoleCreate(t, b, s, name, spRole1)
+
+		resp, err := testRoleRead(t, b, s, name)
+		assertErrorIsNil(t, err)
+
+		convertRespTypes(resp.Data)
+		equal(t, spRole1, resp.Data)
+
+		resp, err = b.HandleRequest(context.Background(), &logical.Request{
+			Operation: logical.CreateOperation,
+			Path:      "roles/" + name,
+			Data:      spRole1Update,
+			Storage:   s,
+		})
+		assertErrorIsNil(t, err)
+		equal(t, true, resp.IsError())
+		equal(t, "the role's application_object_id cannot be updated/removed (recreate role)", resp.Error().Error())
 	})
 
 	t.Run("Optional role TTLs", func(t *testing.T) {
