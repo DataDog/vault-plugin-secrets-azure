@@ -302,8 +302,9 @@ func TestStaticSPRead(t *testing.T) {
 		equal(t, 0*time.Second, resp.Secret.MaxTTL)
 
 		roleUpdate := map[string]interface{}{
-			"ttl":     20,
-			"max_ttl": 30,
+			"application_object_id": "00000000-0000-0000-0000-000000000000",
+			"ttl":                   20,
+			"max_ttl":               30,
 		}
 		testRoleCreate(t, b, s, name, roleUpdate)
 

@@ -161,12 +161,31 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 		return nil, errwrap.Wrapf("error reading role: {{err}}", err)
 	}
 
+	var appObjectID string
+	appObjectIDRaw, appObjectIDRawOk := d.GetOk("application_object_id")
+	if appObjectIDRawOk {
+		appObjectID = appObjectIDRaw.(string)
+	}
+
 	if role == nil {
 		if req.Operation == logical.UpdateOperation {
 			return nil, errors.New("role entry not found during update operation")
 		}
 		role = &roleEntry{
 			CredentialType: credentialTypeSP,
+		}
+
+		role.ApplicationObjectID = appObjectID
+		if role.ApplicationObjectID == "" {
+			role.ApplicationType = "dynamic"
+		} else {
+			role.ApplicationType = "static"
+		}
+	} else {
+		// Ensure the application_object_id doesn't change. Effectively also ensure that static and dynamic
+		// roles remain as static or dynamic, respectively.
+		if (appObjectIDRawOk && appObjectID != role.ApplicationObjectID) || (!appObjectIDRawOk && role.ApplicationType == "static") {
+			return logical.ErrorResponse("the role's application_object_id cannot be updated/removed (recreate role)"), nil
 		}
 	}
 
@@ -185,22 +204,6 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 
 	if role.MaxTTL != 0 && role.TTL > role.MaxTTL {
 		return logical.ErrorResponse("ttl cannot be greater than max_ttl"), nil
-	}
-
-	// update and verify Application Object ID if provided
-	if appObjectID, ok := d.GetOk("application_object_id"); ok {
-		role.ApplicationObjectID = appObjectID.(string)
-	}
-
-	if role.ApplicationObjectID != "" {
-		app, err := client.provider.GetApplication(ctx, role.ApplicationObjectID)
-		if err != nil {
-			return nil, errwrap.Wrapf("error loading Application: {{err}}", err)
-		}
-		role.ApplicationID = to.String(app.AppID)
-		role.ApplicationType = "static"
-	} else {
-		role.ApplicationType = "dynamic"
 	}
 
 	// Parse the Azure roles
@@ -299,6 +302,14 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 
 	if role.ApplicationObjectID == "" && len(role.AzureRoles) == 0 && len(role.AzureGroups) == 0 {
 		return logical.ErrorResponse("either Azure role definitions, group definitions, or an Application Object ID must be provided"), nil
+	}
+
+	if role.ApplicationType == "static" && role.ApplicationID == "" {
+		app, err := client.provider.GetApplication(ctx, role.ApplicationObjectID)
+		if err != nil {
+			return nil, errwrap.Wrapf("error loading Application: {{err}}", err)
+		}
+		role.ApplicationID = to.String(app.AppID)
 	}
 
 	var r *roleEntry
