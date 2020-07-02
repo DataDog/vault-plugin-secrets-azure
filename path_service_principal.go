@@ -74,14 +74,16 @@ func (b *azureSecretBackend) pathSPRead(ctx context.Context, req *logical.Reques
 		return logical.ErrorResponse(fmt.Sprintf("role '%s' does not exist", roleName)), nil
 	}
 
-	var r *roleEntry
 	var secretType string
-	if role.ApplicationType == "static" {
-		r, err = b.createStaticSPSecret(ctx, client, roleName, role)
+	switch role.ApplicationType {
+	case applicationTypeStatic:
+		err = b.createStaticSPSecret(ctx, client, role)
 		secretType = SecretTypeStaticSP
-	} else {
-		r, err = b.createSPSecret(ctx, client, roleName, role)
+	case applicationTypeDynamic:
+		err = b.createSPSecret(ctx, client, role)
 		secretType = SecretTypeSP
+	default:
+		return nil, fmt.Errorf("unknown role ApplicationType \"%v\"", role.ApplicationType)
 	}
 
 	if err != nil {
@@ -89,15 +91,15 @@ func (b *azureSecretBackend) pathSPRead(ctx context.Context, req *logical.Reques
 	}
 
 	data := map[string]interface{}{
-		"client_id":     r.ApplicationID,
-		"client_secret": r.Credentials.Password,
+		"client_id":     role.ApplicationID,
+		"client_secret": role.Credentials.Password,
 	}
 	internalData := map[string]interface{}{
-		"app_object_id":        r.ApplicationObjectID,
-		"key_id":               r.Credentials.KeyId,
-		"sp_object_id":         r.ServicePrincipalID,
-		"role_assignment_ids":  roleIDs(r.AzureRoles),
-		"group_membership_ids": groupObjectIDs(r.AzureGroups),
+		"app_object_id":        role.ApplicationObjectID,
+		"key_id":               role.Credentials.KeyId,
+		"sp_object_id":         role.ServicePrincipalID,
+		"role_assignment_ids":  roleIDs(role.AzureRoles),
+		"group_membership_ids": groupObjectIDs(role.AzureGroups),
 		"role":                 roleName,
 	}
 	resp := b.Secret(secretType).Response(data, internalData)
@@ -108,12 +110,12 @@ func (b *azureSecretBackend) pathSPRead(ctx context.Context, req *logical.Reques
 }
 
 // createSPSecret generates a new App/Service Principal.
-func (b *azureSecretBackend) createSPSecret(ctx context.Context, c *client, roleName string, role *roleEntry) (*roleEntry, error) {
+func (b *azureSecretBackend) createSPSecret(ctx context.Context, c *client, role *roleEntry) error {
 	// Create the App, which is the top level object to be tracked in the secret
 	// and deleted upon revocation. If any subsequent step fails, the App is deleted.
 	app, err := c.createApp(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	appID := to.String(app.AppID)
 	appObjID := to.String(app.ObjectID)
@@ -122,66 +124,48 @@ func (b *azureSecretBackend) createSPSecret(ctx context.Context, c *client, role
 	sp, password, err := c.createSP(ctx, app, spExpiration)
 	if err != nil {
 		c.deleteApp(ctx, appObjID)
-		return nil, err
+		return err
 	}
 
 	// Assign Azure roles to the new SP
 	if _, err = c.assignRoles(ctx, sp, role.AzureRoles); err != nil {
 		c.deleteApp(ctx, appObjID)
-		return nil, err
+		return err
 	}
 
 	// Assign Azure group memberships to the new SP
-	if err := c.addGroupMemberships(ctx, sp, role.AzureGroups); err != nil {
+	if err = c.addGroupMemberships(ctx, sp, role.AzureGroups); err != nil {
 		c.deleteApp(ctx, appObjID)
-		return nil, err
+		return err
 	}
 
-	r := &roleEntry{
-		CredentialType:      role.CredentialType,
-		AzureRoles:          role.AzureRoles,
-		AzureGroups:         role.AzureGroups,
-		ApplicationID:       appID,
-		ApplicationObjectID: appObjID,
-		ApplicationType:     role.ApplicationType,
-		ServicePrincipalID:  to.String(sp.ObjectID),
-		TTL:                 role.TTL,
-		MaxTTL:              role.MaxTTL,
-		Credentials: &ClientCredentials{
-			Password: password,
-		},
+	role.ApplicationID = appID
+	role.ApplicationObjectID = appObjID
+	role.ServicePrincipalID = to.String(sp.ObjectID)
+	role.Credentials = &ClientCredentials{
+		Password: password,
 	}
 
-	return r, nil
+	return nil
 }
 
 // createStaticSPSecret adds a new password to the App associated with the role.
-func (b *azureSecretBackend) createStaticSPSecret(ctx context.Context, c *client, roleName string, role *roleEntry) (*roleEntry, error) {
+func (b *azureSecretBackend) createStaticSPSecret(ctx context.Context, c *client, role *roleEntry) error {
 	lock := locksutil.LockForKey(b.appLocks, role.ApplicationObjectID)
 	lock.Lock()
 	defer lock.Unlock()
 
 	keyID, password, err := c.addAppPassword(ctx, role.ApplicationObjectID, spExpiration)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	r := &roleEntry{
-		CredentialType:      role.CredentialType,
-		AzureRoles:          role.AzureRoles,
-		AzureGroups:         role.AzureGroups,
-		ApplicationID:       role.ApplicationID,
-		ApplicationObjectID: role.ApplicationObjectID,
-		ApplicationType:     role.ApplicationType,
-		TTL:                 role.TTL,
-		MaxTTL:              role.MaxTTL,
-		Credentials: &ClientCredentials{
-			KeyId:    keyID,
-			Password: password,
-		},
+	role.Credentials = &ClientCredentials{
+		KeyId:    keyID,
+		Password: password,
 	}
 
-	return r, nil
+	return nil
 }
 
 func (b *azureSecretBackend) spRenew(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
@@ -250,7 +234,6 @@ func (b *azureSecretBackend) spRevoke(ctx context.Context, req *logical.Request,
 }
 
 func (b *azureSecretBackend) spRemove(ctx context.Context, req *logical.Request, role *roleEntry) (*logical.Response, error) {
-	resp := new(logical.Response)
 	if len(role.AzureGroups) != 0 && role.ServicePrincipalID == "" {
 		return nil, errors.New("service principal ID not found")
 	}
@@ -260,6 +243,7 @@ func (b *azureSecretBackend) spRemove(ctx context.Context, req *logical.Request,
 		return nil, errwrap.Wrapf("error during revoke: {{err}}", err)
 	}
 
+	resp := new(logical.Response)
 	// unassigning roles is effectively a garbage collection operation. Errors will be noted but won't fail the
 	// revocation process. Deleting the app, however, *is* required to consider the secret revoked.
 	if err := c.unassignRoles(ctx, roleIDs(role.AzureRoles)); err != nil {
@@ -274,7 +258,6 @@ func (b *azureSecretBackend) spRemove(ctx context.Context, req *logical.Request,
 	}
 
 	err = c.deleteApp(ctx, role.ApplicationObjectID)
-
 	return resp, err
 }
 
