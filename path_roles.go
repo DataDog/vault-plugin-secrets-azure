@@ -18,7 +18,9 @@ import (
 )
 
 const (
-	rolesStoragePath = "roles"
+	rolesStoragePath       = "roles"
+	applicationTypeStatic  = "static"
+	applicationTypeDynamic = "dynamic"
 
 	credentialTypeSP = 0
 )
@@ -177,14 +179,14 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 
 		role.ApplicationObjectID = appObjectID
 		if role.ApplicationObjectID == "" {
-			role.ApplicationType = "dynamic"
+			role.ApplicationType = applicationTypeDynamic
 		} else {
-			role.ApplicationType = "static"
+			role.ApplicationType = applicationTypeStatic
 		}
 	} else {
 		// Ensure the application_object_id doesn't change. Effectively also ensure that static and dynamic
 		// roles remain as static or dynamic, respectively.
-		if (appObjectIDRawOk && appObjectID != role.ApplicationObjectID) || (!appObjectIDRawOk && role.ApplicationType == "static") {
+		if (appObjectIDRawOk && appObjectID != role.ApplicationObjectID) || (!appObjectIDRawOk && role.ApplicationType == applicationTypeStatic) {
 			return logical.ErrorResponse("the role's application_object_id cannot be updated/removed (recreate role)"), nil
 		}
 	}
@@ -304,7 +306,7 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 		return logical.ErrorResponse("either Azure role definitions, group definitions, or an Application Object ID must be provided"), nil
 	}
 
-	if role.ApplicationType == "static" && role.ApplicationID == "" {
+	if role.ApplicationType == applicationTypeStatic && role.ApplicationID == "" {
 		app, err := client.provider.GetApplication(ctx, role.ApplicationObjectID)
 		if err != nil {
 			return nil, errwrap.Wrapf("error loading Application: {{err}}", err)
@@ -312,13 +314,15 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 		role.ApplicationID = to.String(app.AppID)
 	}
 
-	var r *roleEntry
 	// Only add credentials if this is a new role or a role that existed before access token support was available
-	if req.Operation == logical.CreateOperation || role.Credentials == nil {
-		if role.ApplicationType == "static" {
-			r, err = b.createStaticSPSecret(ctx, client, name, role)
-		} else {
-			r, err = b.createSPSecret(ctx, req.Storage, client, name, role)
+	if role.Credentials == nil {
+		switch role.ApplicationType {
+		case applicationTypeStatic:
+			err = b.createStaticSPSecret(ctx, client, role)
+		case applicationTypeDynamic:
+			err = b.createSPSecret(ctx, req.Storage, client, role)
+		default:
+			return nil, fmt.Errorf("unknown role ApplicationType \"%v\"", role.ApplicationType)
 		}
 		if err != nil {
 			return nil, err
@@ -326,7 +330,7 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 	}
 
 	// save role
-	err = saveRole(ctx, req.Storage, r, name)
+	err = saveRole(ctx, req.Storage, role, name)
 	if err != nil {
 		return nil, errwrap.Wrapf("error storing role: {{err}}", err)
 	}
@@ -339,22 +343,22 @@ func (b *azureSecretBackend) pathRoleRead(ctx context.Context, req *logical.Requ
 
 	name := d.Get("name").(string)
 
-	r, err := getRole(ctx, name, req.Storage)
+	role, err := getRole(ctx, name, req.Storage)
 	if err != nil {
 		return nil, errwrap.Wrapf("error reading role: {{err}}", err)
 	}
 
-	if r == nil {
+	if role == nil {
 		return nil, nil
 	}
 
-	data["ttl"] = r.TTL / time.Second
-	data["max_ttl"] = r.MaxTTL / time.Second
-	data["azure_roles"] = r.AzureRoles
-	data["azure_groups"] = r.AzureGroups
+	data["ttl"] = role.TTL / time.Second
+	data["max_ttl"] = role.MaxTTL / time.Second
+	data["azure_roles"] = role.AzureRoles
+	data["azure_groups"] = role.AzureGroups
 	aoid := ""
-	if r.ApplicationType == "static" {
-		aoid = r.ApplicationObjectID
+	if role.ApplicationType == applicationTypeStatic {
+		aoid = role.ApplicationObjectID
 	}
 	data["application_object_id"] = aoid
 
@@ -388,16 +392,19 @@ func (b *azureSecretBackend) pathRoleDelete(ctx context.Context, req *logical.Re
 	}
 
 	var resp *logical.Response
-	if role.ApplicationType == "static" {
+	switch role.ApplicationType {
+	case applicationTypeStatic:
 		resp, err = b.staticSPRemove(ctx, req, role)
 		if err != nil {
-			return &logical.Response{Warnings: []string{"error removing existing Azure app password"}}, nil
+			return &logical.Response{Warnings: []string{"error removing existing Azure app password"}}, err
 		}
-	} else {
+	case applicationTypeDynamic:
 		resp, err = b.spRemove(ctx, req, role)
 		if err != nil {
-			return &logical.Response{Warnings: []string{"error removing dynamic Azure service principal"}}, nil
+			return &logical.Response{Warnings: []string{"error removing dynamic Azure service principal"}}, err
 		}
+	default:
+		return nil, fmt.Errorf("unable to delete role, unknown role ApplicationType \"%v\"", role.ApplicationType)
 	}
 
 	err = req.Storage.Delete(ctx, fmt.Sprintf("%s/%s", rolesStoragePath, name))
