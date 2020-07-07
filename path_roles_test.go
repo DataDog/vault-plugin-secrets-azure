@@ -631,46 +631,74 @@ func TestRoleList(t *testing.T) {
 }
 
 func TestRoleDelete(t *testing.T) {
-	b, s := getTestBackend(t, true)
-	name := "test_role"
-	nameAlt := "test_role_alt"
+	t.Run("ensure other roles not deleted", func(t *testing.T) {
+		b, s := getTestBackend(t, true)
+		name := "test_role"
+		nameAlt := "test_role_alt"
 
-	role := map[string]interface{}{
-		"azure_roles": compactJSON(`[{}]`),
-	}
+		role := map[string]interface{}{
+			"azure_roles": compactJSON(`[{}]`),
+		}
 
-	// Create two roles and verify they're present
-	testRoleCreate(t, b, s, name, role)
-	testRoleCreate(t, b, s, nameAlt, role)
+		// Create two roles and verify they're present
+		testRoleCreate(t, b, s, name, role)
+		testRoleCreate(t, b, s, nameAlt, role)
 
-	// Delete one role and verify it is gone, and the other remains
-	resp, err := b.HandleRequest(context.Background(), &logical.Request{
-		Operation: logical.DeleteOperation,
-		Path:      fmt.Sprintf("roles/%s", name),
-		Storage:   s,
+		// Delete one role and verify it is gone, and the other remains
+		resp, err := b.HandleRequest(context.Background(), &logical.Request{
+			Operation: logical.DeleteOperation,
+			Path:      fmt.Sprintf("roles/%s", name),
+			Storage:   s,
+		})
+		assertErrorIsNil(t, err)
+
+		resp, err = testRoleRead(t, b, s, name)
+		if resp != nil || err != nil {
+			t.Fatalf("expected nil response and error, actual:%#v and %#v", resp, err.Error())
+		}
+
+		resp, err = testRoleRead(t, b, s, nameAlt)
+		assertErrorIsNil(t, err)
+		if resp == nil {
+			t.Fatalf("expected non-nil response, actual:%#v", resp)
+		}
+
+		// Verify that delete against a missing role is a successful no-op
+		resp, err = b.HandleRequest(context.Background(), &logical.Request{
+			Operation: logical.DeleteOperation,
+			Path:      "roles/not_a_role",
+			Storage:   s,
+		})
+		if resp != nil || err != nil {
+			t.Fatalf("expected nil response and error, actual:%#v and %#v", resp, err)
+		}
 	})
-	assertErrorIsNil(t, err)
 
-	resp, err = testRoleRead(t, b, s, name)
-	if resp != nil || err != nil {
-		t.Fatalf("expected nil response and error, actual:%#v and %#v", resp, err.Error())
-	}
+	// Tests issue where an updated role was not correctly persisted to storage
+	t.Run("ensure updated roles can be deleted", func(t *testing.T) {
+		b, s := getTestBackend(t, true)
+		name := "test_role"
 
-	resp, err = testRoleRead(t, b, s, nameAlt)
-	assertErrorIsNil(t, err)
-	if resp == nil {
-		t.Fatalf("expected non-nil response, actual:%#v", resp)
-	}
+		role := map[string]interface{}{
+			"azure_roles": compactJSON(`[{}]`),
+		}
 
-	// Verify that delete against a missing role is a succesful no-op
-	resp, err = b.HandleRequest(context.Background(), &logical.Request{
-		Operation: logical.DeleteOperation,
-		Path:      "roles/not_a_role",
-		Storage:   s,
+		testRoleCreate(t, b, s, name, role)
+
+		testRoleUpdate(t, b, s, name, role)
+
+		resp, err := b.HandleRequest(context.Background(), &logical.Request{
+			Operation: logical.DeleteOperation,
+			Path:      fmt.Sprintf("roles/%s", name),
+			Storage:   s,
+		})
+		assertErrorIsNil(t, err)
+
+		resp, err = testRoleRead(t, b, s, name)
+		if resp != nil || err != nil {
+			t.Fatalf("expected nil response and error, actual:%#v and %#v", resp, err.Error())
+		}
 	})
-	if resp != nil || err != nil {
-		t.Fatalf("expected nil response and error, actual:%#v and %#v", resp, err)
-	}
 }
 
 // Utility function to create a role and fail on errors
@@ -678,6 +706,24 @@ func testRoleCreate(t *testing.T, b *azureSecretBackend, s logical.Storage, name
 	t.Helper()
 	resp, err := b.HandleRequest(context.Background(), &logical.Request{
 		Operation: logical.CreateOperation,
+		Path:      fmt.Sprintf("roles/%s", name),
+		Data:      d,
+		Storage:   s,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if resp != nil && resp.IsError() {
+		t.Fatal(resp.Error())
+	}
+}
+
+func testRoleUpdate(t *testing.T, b *azureSecretBackend, s logical.Storage, name string, d map[string]interface{}) {
+	t.Helper()
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Operation: logical.UpdateOperation,
 		Path:      fmt.Sprintf("roles/%s", name),
 		Data:      d,
 		Storage:   s,
