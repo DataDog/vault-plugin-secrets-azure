@@ -211,21 +211,19 @@ func (c *client) deleteApp(ctx context.Context, appObjectID string) error {
 }
 
 // assignRoles assigns Azure roles to a service principal.
-func (c *client) assignRoles(ctx context.Context, sp *graphrbac.ServicePrincipal, roles []*AzureRole) ([]string, error) {
-	var ids []string
-
+func (c *client) assignRoles(ctx context.Context, servicePrincipalObjectID string, roles []*AzureRole) error {
 	for _, role := range roles {
 		assignmentID, err := uuid.GenerateUUID()
 		if err != nil {
-			return nil, err
+			return err
 		}
 
-		resultRaw, err := retry(ctx, func() (interface{}, bool, error) {
+		_, err = retry(ctx, func() (interface{}, bool, error) {
 			ra, err := c.provider.CreateRoleAssignment(ctx, role.Scope, assignmentID,
 				authorization.RoleAssignmentCreateParameters{
 					RoleAssignmentProperties: &authorization.RoleAssignmentProperties{
 						RoleDefinitionID: to.StringPtr(role.RoleID),
-						PrincipalID:      sp.ObjectID,
+						PrincipalID:      &servicePrincipalObjectID,
 					},
 				})
 
@@ -238,24 +236,22 @@ func (c *client) assignRoles(ctx context.Context, sp *graphrbac.ServicePrincipal
 		})
 
 		if err != nil {
-			return nil, errwrap.Wrapf("error while assigning roles: {{err}}", err)
+			return errwrap.Wrapf("error while assigning roles: {{err}}", err)
 		}
-
-		ids = append(ids, resultRaw.(string))
 	}
 
-	return ids, nil
+	return nil
 }
 
 // unassignRoles deletes role assignments, if they existed.
 // This is a clean-up operation that isn't essential to revocation. As such, an
 // attempt is made to remove all assignments, and not return immediately if there
 // is an error.
-func (c *client) unassignRoles(ctx context.Context, roleIDs []string) error {
+func (c *client) unassignRoles(ctx context.Context, roles []*AzureRole) error {
 	var merr *multierror.Error
 
-	for _, id := range roleIDs {
-		if _, err := c.provider.DeleteRoleAssignmentByID(ctx, id); err != nil {
+	for _, role := range roles {
+		if _, err := c.provider.DeleteRoleAssignmentByID(ctx, role.RoleID); err != nil {
 			merr = multierror.Append(merr, errwrap.Wrapf("error unassigning role: {{err}}", err))
 		}
 	}
@@ -264,7 +260,7 @@ func (c *client) unassignRoles(ctx context.Context, roleIDs []string) error {
 }
 
 // addGroupMemberships adds the service principal to the Azure groups.
-func (c *client) addGroupMemberships(ctx context.Context, sp *graphrbac.ServicePrincipal, groups []*AzureGroup) error {
+func (c *client) addGroupMemberships(ctx context.Context, servicePrincipalObjectID string, groups []*AzureGroup) error {
 	for _, group := range groups {
 		_, err := retry(ctx, func() (interface{}, bool, error) {
 			_, err := c.provider.AddGroupMember(ctx, group.ObjectID,
@@ -273,7 +269,7 @@ func (c *client) addGroupMemberships(ctx context.Context, sp *graphrbac.ServiceP
 						fmt.Sprintf("%s%s/directoryObjects/%s",
 							c.settings.Environment.GraphEndpoint,
 							c.settings.TenantID,
-							*sp.ObjectID,
+							servicePrincipalObjectID,
 						),
 					),
 				})
@@ -298,11 +294,11 @@ func (c *client) addGroupMemberships(ctx context.Context, sp *graphrbac.ServiceP
 // groups. This is a clean-up operation that isn't essential to revocation. As
 // such, an attempt is made to remove all memberships, and not return
 // immediately if there is an error.
-func (c *client) removeGroupMemberships(ctx context.Context, servicePrincipalObjectID string, groupIDs []string) error {
+func (c *client) removeGroupMemberships(ctx context.Context, servicePrincipalObjectID string, groups []*AzureGroup) error {
 	var merr *multierror.Error
 
-	for _, id := range groupIDs {
-		if _, err := c.provider.RemoveGroupMember(ctx, servicePrincipalObjectID, id); err != nil {
+	for _, id := range groups {
+		if _, err := c.provider.RemoveGroupMember(ctx, servicePrincipalObjectID, id.ObjectID); err != nil {
 			merr = multierror.Append(merr, errwrap.Wrapf("error removing group membership: {{err}}", err))
 		}
 	}

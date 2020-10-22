@@ -137,16 +137,6 @@ func (b *azureSecretBackend) createSPSecret(ctx context.Context, s logical.Stora
 		return err
 	}
 
-	// Assign Azure roles to the new SP
-	if _, err = c.assignRoles(ctx, sp, role.AzureRoles); err != nil {
-		return err
-	}
-
-	// Assign Azure group memberships to the new SP
-	if err = c.addGroupMemberships(ctx, sp, role.AzureGroups); err != nil {
-		return err
-	}
-
 	// SP is fully created so delete the WAL
 	if err := framework.DeleteWAL(ctx, s, walID); err != nil {
 		return errwrap.Wrapf("error deleting WAL: {{err}}", err)
@@ -259,14 +249,14 @@ func (b *azureSecretBackend) spRemove(ctx context.Context, req *logical.Request,
 	resp := new(logical.Response)
 	// unassigning roles is effectively a garbage collection operation. Errors will be noted but won't fail the
 	// revocation process. Deleting the app, however, *is* required to consider the secret revoked.
-	if err := c.unassignRoles(ctx, roleIDs(role.AzureRoles)); err != nil {
+	if err := c.unassignRoles(ctx, role.AzureRoles); err != nil {
 		resp.AddWarning(err.Error())
 	}
 
 	// removing group membership is effectively a garbage collection
 	// operation. Errors will be noted but won't fail the revocation process.
 	// Deleting the app, however, *is* required to consider the secret revoked.
-	if err := c.removeGroupMemberships(ctx, role.ServicePrincipalID, groupObjectIDs(role.AzureGroups)); err != nil {
+	if err := c.removeGroupMemberships(ctx, role.ServicePrincipalID, role.AzureGroups); err != nil {
 		resp.AddWarning(err.Error())
 	}
 
