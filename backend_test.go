@@ -206,11 +206,11 @@ func (m *mockProvider) VMUpdate(ctx context.Context, resourceGroupName string, V
 
 func (m *mockProvider) CreateRoleAssignment(ctx context.Context, scope string, roleAssignmentName string, parameters authorization.RoleAssignmentCreateParameters) (authorization.RoleAssignment, error) {
 	return authorization.RoleAssignment{
-		ID: to.StringPtr(generateUUID()),
+		ID: to.StringPtr(fmt.Sprintf("00000000-1111-2222-3333-444444444444FAKE_ROLE_ASSIGNMENT/%s", to.String(parameters.RoleDefinitionID))),
 	}, nil
 }
 
-func (m *mockProvider) DeleteRoleAssignmentByID(ctx context.Context, roleID string) (result authorization.RoleAssignment, err error) {
+func (m *mockProvider) DeleteRoleAssignmentByID(ctx context.Context, roleAssignmentID string) (result authorization.RoleAssignment, err error) {
 	return authorization.RoleAssignment{}, nil
 }
 

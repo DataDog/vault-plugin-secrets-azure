@@ -75,19 +75,31 @@ func (b *azureSecretBackend) pathSPRead(ctx context.Context, req *logical.Reques
 	}
 
 	var secretType string
-	switch role.ApplicationType {
-	case applicationTypeStatic:
-		err = b.createStaticSPSecret(ctx, client, role)
-		secretType = SecretTypeStaticSP
-	case applicationTypeDynamic:
-		err = b.createSPSecret(ctx, client, role)
+	var raIDs []string
+	if role.ApplicationType == applicationTypeDynamic {
 		secretType = SecretTypeSP
-	default:
-		return nil, fmt.Errorf("unknown role ApplicationType \"%v\"", role.ApplicationType)
-	}
+		err = b.createSPSecret(ctx, client, role)
+		if err != nil {
+			return nil, err
+		}
 
-	if err != nil {
-		return nil, err
+		raIDs, err = client.assignRoles(ctx, role.ServicePrincipalID, role.AzureRoles)
+		if err != nil {
+			return nil, err
+		}
+
+		err := client.addGroupMemberships(ctx, role.ServicePrincipalID, role.AzureGroups)
+		if err != nil {
+			return nil, err
+		}
+	} else if role.ApplicationType == applicationTypeStatic {
+		secretType = SecretTypeStaticSP
+		err = b.createStaticSPSecret(ctx, client, role)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		return nil, fmt.Errorf("unknown role ApplicationType \"%v\"", role.ApplicationType)
 	}
 
 	data := map[string]interface{}{
@@ -98,7 +110,7 @@ func (b *azureSecretBackend) pathSPRead(ctx context.Context, req *logical.Reques
 		"app_object_id":        role.ApplicationObjectID,
 		"key_id":               role.Credentials.KeyId,
 		"sp_object_id":         role.ServicePrincipalID,
-		"role_assignment_ids":  roleIDs(role.AzureRoles),
+		"role_assignment_ids":  raIDs,
 		"group_membership_ids": groupObjectIDs(role.AzureGroups),
 		"role":                 roleName,
 	}
@@ -197,7 +209,7 @@ func (b *azureSecretBackend) spRevoke(ctx context.Context, req *logical.Request,
 	if req.Secret.InternalData["role_assignment_ids"] != nil {
 		for _, v := range req.Secret.InternalData["role_assignment_ids"].([]interface{}) {
 			roles = append(roles, &AzureRole{
-				RoleID: v.(string),
+				RoleAssignmentID: v.(string),
 			})
 		}
 	}
@@ -242,7 +254,7 @@ func (b *azureSecretBackend) spRemove(ctx context.Context, req *logical.Request,
 	// operation. Errors will be noted but won't fail the revocation process.
 	// Deleting the app, however, *is* required to consider the secret revoked.
 	if err := c.removeGroupMemberships(ctx, role.ServicePrincipalID, role.AzureGroups); err != nil {
-		resp.AddWarning(err.Error())
+		return nil, err
 	}
 
 	err = c.deleteApp(ctx, role.ApplicationObjectID)
