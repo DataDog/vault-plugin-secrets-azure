@@ -55,6 +55,8 @@ type AzureRole struct {
 	RoleName string `json:"role_name"` // e.g. Owner
 	RoleID   string `json:"role_id"`   // e.g. /subscriptions/e0a207b2-.../providers/Microsoft.Authorization/roleDefinitions/de139f84-...
 	Scope    string `json:"scope"`     // e.g. /subscriptions/e0a207b2-...
+
+	RoleAssignmentID string `json:"role_assignment_id"` // e.g. /subscriptions/e0a207b2-.../providers/Microsoft.Authorization/roleAssignments/de139f84-...
 }
 
 // AzureGroup is an Azure Active Directory Group
@@ -381,7 +383,7 @@ func (b *azureSecretBackend) configureRoles(ctx context.Context, client *client,
 	rolesToAdd := roleSetDifference(requestedRoles, role.AzureRoles)
 	rolesToRemove := roleSetDifference(role.AzureRoles, requestedRoles)
 
-	err := client.assignRoles(ctx, role.ServicePrincipalID, rolesToAdd)
+	_, err := client.assignRoles(ctx, role.ServicePrincipalID, rolesToAdd)
 	if err != nil {
 		return err
 	}

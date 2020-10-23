@@ -211,14 +211,16 @@ func (c *client) deleteApp(ctx context.Context, appObjectID string) error {
 }
 
 // assignRoles assigns Azure roles to a service principal.
-func (c *client) assignRoles(ctx context.Context, servicePrincipalObjectID string, roles []*AzureRole) error {
+func (c *client) assignRoles(ctx context.Context, servicePrincipalObjectID string, roles []*AzureRole) ([]string, error) {
+	var ids []string
+
 	for _, role := range roles {
 		assignmentID, err := uuid.GenerateUUID()
 		if err != nil {
-			return err
+			return nil, err
 		}
 
-		_, err = retry(ctx, func() (interface{}, bool, error) {
+		resultRaw, err := retry(ctx, func() (interface{}, bool, error) {
 			ra, err := c.provider.CreateRoleAssignment(ctx, role.Scope, assignmentID,
 				authorization.RoleAssignmentCreateParameters{
 					RoleAssignmentProperties: &authorization.RoleAssignmentProperties{
@@ -232,15 +234,18 @@ func (c *client) assignRoles(ctx context.Context, servicePrincipalObjectID strin
 				return nil, false, nil
 			}
 
-			return to.String(ra.ID), true, err
+			role.RoleAssignmentID = to.String(ra.ID)
+			return role.RoleAssignmentID, true, err
 		})
 
 		if err != nil {
-			return errwrap.Wrapf("error while assigning roles: {{err}}", err)
+			return nil, errwrap.Wrapf("error while assigning roles: {{err}}", err)
 		}
+
+		ids = append(ids, resultRaw.(string))
 	}
 
-	return nil
+	return ids, nil
 }
 
 // unassignRoles deletes role assignments, if they existed.
@@ -251,7 +256,7 @@ func (c *client) unassignRoles(ctx context.Context, roles []*AzureRole) error {
 	var merr *multierror.Error
 
 	for _, role := range roles {
-		if _, err := c.provider.DeleteRoleAssignmentByID(ctx, role.RoleID); err != nil {
+		if _, err := c.provider.DeleteRoleAssignmentByID(ctx, role.RoleAssignmentID); err != nil {
 			merr = multierror.Append(merr, errwrap.Wrapf("error unassigning role: {{err}}", err))
 		}
 	}
@@ -297,8 +302,8 @@ func (c *client) addGroupMemberships(ctx context.Context, servicePrincipalObject
 func (c *client) removeGroupMemberships(ctx context.Context, servicePrincipalObjectID string, groups []*AzureGroup) error {
 	var merr *multierror.Error
 
-	for _, id := range groups {
-		if _, err := c.provider.RemoveGroupMember(ctx, servicePrincipalObjectID, id.ObjectID); err != nil {
+	for _, group := range groups {
+		if _, err := c.provider.RemoveGroupMember(ctx, group.ObjectID, servicePrincipalObjectID); err != nil {
 			merr = multierror.Append(merr, errwrap.Wrapf("error removing group membership: {{err}}", err))
 		}
 	}

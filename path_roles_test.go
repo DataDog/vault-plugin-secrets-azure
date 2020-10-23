@@ -21,12 +21,14 @@ func TestRoleCreate(t *testing.T) {
 		{
 			"role_name": "Owner",
 			"role_id": "/subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Owner",
-			"scope":  "test_scope_1"
+			"scope":  "test_scope_1",
+			"role_assignment_id":"00000000-1111-2222-3333-444444444444FAKE_ROLE_ASSIGNMENT//subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Owner"
 		},
 		{
 			"role_name": "Owner2",
 			"role_id": "/subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Owner2",
-			"scope":  "test_scope_2"
+			"scope":  "test_scope_2",
+			"role_assignment_id":"00000000-1111-2222-3333-444444444444FAKE_ROLE_ASSIGNMENT//subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Owner2"
 		}]`),
 			"azure_groups": compactJSON(`[
 		{
@@ -47,12 +49,14 @@ func TestRoleCreate(t *testing.T) {
 		{
 			"role_name": "Contributor",
 			"role_id": "/subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Contributor",
-			"scope":  "test_scope_3"
+			"scope":  "test_scope_3",
+			"role_assignment_id":"00000000-1111-2222-3333-444444444444FAKE_ROLE_ASSIGNMENT//subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Contributor"
 		},
 		{
 			"role_name": "Contributor2",
 			"role_id": "/subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Contributor2",
-			"scope":  "test_scope_3"
+			"scope":  "test_scope_3",
+			"role_assignment_id":"00000000-1111-2222-3333-444444444444FAKE_ROLE_ASSIGNMENT//subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Contributor2"
 		}]`),
 			"azure_groups": compactJSON(`[
 		{
@@ -149,7 +153,8 @@ func TestRoleCreate(t *testing.T) {
 				{
 					"role_name": "Contributor",
 					"role_id": "/subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Contributor",
-					"scope":  "test_scope_3"
+					"scope":  "test_scope_3",
+					"role_assignment_id":"00000000-1111-2222-3333-444444444444FAKE_ROLE_ASSIGNMENT//subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Contributor"
 				}]`,
 			),
 			"azure_groups":          "[]",
@@ -230,7 +235,8 @@ func TestRoleCreate(t *testing.T) {
 				{
 					"role_name": "Contributor",
 					"role_id": "/subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Contributor",
-					"scope":  "test_scope_3"
+					"scope":  "test_scope_3",
+					"role_assignment_id":"00000000-1111-2222-3333-444444444444FAKE_ROLE_ASSIGNMENT//subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Contributor"
 				}]`,
 			),
 			"application_object_id": "",
@@ -563,12 +569,14 @@ func TestRoleUpdate(t *testing.T) {
 			"azure_roles": compactJSON(`[{
 				"role_name": "Owner",
 				"role_id": "/subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Owner",
-				"scope":  "test_scope_1"
+				"scope":  "test_scope_1",
+				"role_assignment_id": "00000000-1111-2222-3333-444444444444FAKE_ROLE_ASSIGNMENT//subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Owner"
 			},
 			{
 				"role_name": "Owner2",
 				"role_id": "/subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Owner2",
-				"scope":  "test_scope_2"
+				"scope":  "test_scope_2",
+				"role_assignment_id": "00000000-1111-2222-3333-444444444444FAKE_ROLE_ASSIGNMENT//subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Owner2"
 			}]`),
 			"azure_groups": compactJSON(`[{
 				"group_name": "foo",
@@ -599,7 +607,8 @@ func TestRoleUpdate(t *testing.T) {
 			"azure_roles": compactJSON(`[{
 				"role_name": "Owner",
 				"role_id": "/subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Owner",
-				"scope":  "test_scope_1"
+				"scope":  "test_scope_1",
+				"role_assignment_id": "00000000-1111-2222-3333-444444444444FAKE_ROLE_ASSIGNMENT//subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Owner"
 			}]`),
 			"azure_groups": compactJSON(`[{
 				"group_name": "foo",
