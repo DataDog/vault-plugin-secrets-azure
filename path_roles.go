@@ -56,7 +56,7 @@ type AzureRole struct {
 	RoleID   string `json:"role_id"`   // e.g. /subscriptions/e0a207b2-.../providers/Microsoft.Authorization/roleDefinitions/de139f84-...
 	Scope    string `json:"scope"`     // e.g. /subscriptions/e0a207b2-...
 
-	RoleAssignmentID string `json:"role_assignment_id"` // e.g. /subscriptions/e0a207b2-.../providers/Microsoft.Authorization/roleAssignments/de139f84-...
+	RoleAssignmentID string `json:"role_assignment_id,omitempty"` // e.g. /subscriptions/e0a207b2-.../providers/Microsoft.Authorization/roleAssignments/de139f84-...
 }
 
 // AzureGroup is an Azure Active Directory Group
@@ -413,6 +413,9 @@ func (b *azureSecretBackend) pathRoleRead(ctx context.Context, req *logical.Requ
 
 	data["ttl"] = role.TTL / time.Second
 	data["max_ttl"] = role.MaxTTL / time.Second
+	for _, ar := range role.AzureRoles {
+		ar.RoleAssignmentID = ""
+	}
 	data["azure_roles"] = role.AzureRoles
 	data["azure_groups"] = role.AzureGroups
 	aoid := ""
