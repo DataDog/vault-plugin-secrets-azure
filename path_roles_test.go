@@ -3,6 +3,7 @@ package azuresecrets
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -554,24 +555,98 @@ func TestRoleCreateBad(t *testing.T) {
 	}
 }
 
-func TestRoleUpdateError(t *testing.T) {
-	b, s := getTestBackend(t, true)
+func TestRoleUpdate(t *testing.T) {
+	t.Run("successful update with group changes", func(t *testing.T) {
+		b, s := getTestBackend(t, true)
 
-	role := map[string]interface{}{
-		"azure_roles": compactJSON(`[{}]`),
-	}
+		spRole1 := map[string]interface{}{
+			"azure_roles": compactJSON(`[{
+				"role_name": "Owner",
+				"role_id": "/subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Owner",
+				"scope":  "test_scope_1"
+			},
+			{
+				"role_name": "Owner2",
+				"role_id": "/subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Owner2",
+				"scope":  "test_scope_2"
+			}]`),
+			"azure_groups": compactJSON(`[{
+				"group_name": "foo",
+				"object_id": "239b11fe-6adf-409a-b231-08b918e9de23FAKE_GROUP-foo"
+			},
+			{
+				"group_name": "bar",
+				"object_id": "31c5bf7e-e1e8-42c8-882c-856f776290afFAKE_GROUP-bar"
+			}]`),
+			"ttl":                   int64(0),
+			"max_ttl":               int64(0),
+			"application_object_id": "",
+		}
 
-	name := generateUUID()
-	_, err := b.HandleRequest(context.Background(), &logical.Request{
-		Operation: logical.UpdateOperation,
-		Path:      "roles/" + name,
-		Data:      role,
-		Storage:   s,
+		spRole1Update := map[string]interface{}{
+			"azure_roles": compactJSON(`[{
+				"role_name": "Owner",
+				"scope":  "test_scope_1"
+			}]`),
+			"azure_groups": compactJSON(`[{
+				"group_name": "foo"
+			}]`),
+			"ttl":     int64(0),
+			"max_ttl": int64(0),
+		}
+
+		expectedSpRole1 := map[string]interface{}{
+			"azure_roles": compactJSON(`[{
+				"role_name": "Owner",
+				"role_id": "/subscriptions/FAKE_SUB_ID/providers/Microsoft.Authorization/roleDefinitions/FAKE_ROLE-Owner",
+				"scope":  "test_scope_1"
+			}]`),
+			"azure_groups": compactJSON(`[{
+				"group_name": "foo",
+				"object_id": "00000000-1111-2222-3333-444444444444FAKE_GROUP-foo"
+			}]`),
+			"ttl":                   int64(0),
+			"max_ttl":               int64(0),
+			"application_object_id": "",
+		}
+
+		// Verify basic updates of the name role
+		name := generateUUID()
+		testRoleCreate(t, b, s, name, spRole1)
+
+		resp, err := testRoleRead(t, b, s, name)
+		assertErrorIsNil(t, err)
+		convertRespTypes(resp.Data)
+		equal(t, spRole1, resp.Data)
+
+		testRoleUpdate(t, b, s, name, spRole1Update)
+
+		resp, err = testRoleRead(t, b, s, name)
+		assertErrorIsNil(t, err)
+		convertRespTypes(resp.Data)
+		spRole1Update["application_object_id"] = ""
+		equal(t, expectedSpRole1, resp.Data)
 	})
 
-	if err == nil {
-		t.Fatal("expected error trying to update nonexistent role")
-	}
+	t.Run("update nonexistent role", func(t *testing.T) {
+		b, s := getTestBackend(t, true)
+
+		role := map[string]interface{}{
+			"azure_roles": compactJSON(`[{}]`),
+		}
+
+		name := generateUUID()
+		_, err := b.HandleRequest(context.Background(), &logical.Request{
+			Operation: logical.UpdateOperation,
+			Path:      "roles/" + name,
+			Data:      role,
+			Storage:   s,
+		})
+
+		if err == nil {
+			t.Fatal("expected error trying to update nonexistent role")
+		}
+	})
 }
 
 func TestRoleList(t *testing.T) {
@@ -776,4 +851,66 @@ func convertRespTypes(data map[string]interface{}) {
 	}
 	data["ttl"] = int64(data["ttl"].(time.Duration))
 	data["max_ttl"] = int64(data["max_ttl"].(time.Duration))
+}
+
+func Test_groupSetDifference(t *testing.T) {
+	tests := map[string]struct {
+		a    []*AzureGroup
+		b    []*AzureGroup
+		want []*AzureGroup
+	}{
+		"sets are the same": {
+			a:    []*AzureGroup{{GroupName: "foo", ObjectID: "bar"}},
+			b:    []*AzureGroup{{GroupName: "foo", ObjectID: "bar"}},
+			want: []*AzureGroup{},
+		},
+		"set a contains additional items": {
+			a:    []*AzureGroup{{GroupName: "foo", ObjectID: "bar"}, {GroupName: "hello", ObjectID: "world"}},
+			b:    []*AzureGroup{{GroupName: "foo", ObjectID: "bar"}},
+			want: []*AzureGroup{{GroupName: "hello", ObjectID: "world"}},
+		},
+		"set b contains additional items": {
+			a:    []*AzureGroup{{GroupName: "foo", ObjectID: "bar"}, {GroupName: "lorem", ObjectID: "ipsum"}},
+			b:    []*AzureGroup{{GroupName: "foo", ObjectID: "bar"}, {GroupName: "hello", ObjectID: "world"}},
+			want: []*AzureGroup{{GroupName: "lorem", ObjectID: "ipsum"}},
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := groupSetDifference(tt.a, tt.b); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("sliceDiff() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_roleSetDifference(t *testing.T) {
+	tests := map[string]struct {
+		a    []*AzureRole
+		b    []*AzureRole
+		want []*AzureRole
+	}{
+		"sets are the same": {
+			a:    []*AzureRole{{RoleName: "foo", RoleID: "bar", Scope: "baz"}},
+			b:    []*AzureRole{{RoleName: "foo", RoleID: "bar", Scope: "baz"}},
+			want: []*AzureRole{},
+		},
+		"set a contains additional items": {
+			a:    []*AzureRole{{RoleName: "foo", RoleID: "bar", Scope: "baz"}, {RoleName: "hello", RoleID: "world", Scope: "2.0"}},
+			b:    []*AzureRole{{RoleName: "foo", RoleID: "bar", Scope: "baz"}},
+			want: []*AzureRole{{RoleName: "hello", RoleID: "world", Scope: "2.0"}},
+		},
+		"set b contains additional items": {
+			a:    []*AzureRole{{RoleName: "foo", RoleID: "bar", Scope: "baz"}, {RoleName: "lorem", RoleID: "ipsum", Scope: "dolor"}},
+			b:    []*AzureRole{{RoleName: "foo", RoleID: "bar", Scope: "baz"}, {RoleName: "hello", RoleID: "world", Scope: "2.0"}},
+			want: []*AzureRole{{RoleName: "lorem", RoleID: "ipsum", Scope: "dolor"}},
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := roleSetDifference(tt.a, tt.b); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("sliceDiff() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }

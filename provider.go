@@ -52,7 +52,7 @@ type RoleAssignmentsClient interface {
 		scope string,
 		roleAssignmentName string,
 		parameters authorization.RoleAssignmentCreateParameters) (authorization.RoleAssignment, error)
-	DeleteRoleAssignmentByID(ctx context.Context, roleID string) (authorization.RoleAssignment, error)
+	DeleteRoleAssignmentByID(ctx context.Context, roleAssignmentID string) (authorization.RoleAssignment, error)
 }
 
 type RoleDefinitionsClient interface {
