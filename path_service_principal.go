@@ -78,7 +78,7 @@ func (b *azureSecretBackend) pathSPRead(ctx context.Context, req *logical.Reques
 	var raIDs []string
 	if role.ApplicationType == applicationTypeDynamic {
 		secretType = SecretTypeSP
-		err = b.createSPSecret(ctx, req.Storage, client, role)
+		walID, err := b.createSPSecret(ctx, req.Storage, client, role)
 		if err != nil {
 			return nil, err
 		}
@@ -88,9 +88,13 @@ func (b *azureSecretBackend) pathSPRead(ctx context.Context, req *logical.Reques
 			return nil, err
 		}
 
-		err := client.addGroupMemberships(ctx, role.ServicePrincipalID, role.AzureGroups)
+		err = client.addGroupMemberships(ctx, role.ServicePrincipalID, role.AzureGroups)
 		if err != nil {
 			return nil, err
+		}
+		// SP is fully created so delete the WAL
+		if err := framework.DeleteWAL(ctx, req.Storage, walID); err != nil {
+			return nil, errwrap.Wrapf("error deleting WAL: {{err}}", err)
 		}
 	} else if role.ApplicationType == applicationTypeStatic {
 		secretType = SecretTypeStaticSP
@@ -122,13 +126,13 @@ func (b *azureSecretBackend) pathSPRead(ctx context.Context, req *logical.Reques
 }
 
 // createSPSecret generates a new App/Service Principal.
-func (b *azureSecretBackend) createSPSecret(ctx context.Context, s logical.Storage, c *client, role *roleEntry) error {
+func (b *azureSecretBackend) createSPSecret(ctx context.Context, s logical.Storage, c *client, role *roleEntry) (string, error) {
 	// Create the App, which is the top level object to be tracked in the secret
 	// and deleted upon revocation. If any subsequent step fails, the App will be
 	// deleted as part of WAL rollback.
 	app, err := c.createApp(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	appID := to.String(app.AppID)
 	appObjID := to.String(app.ObjectID)
@@ -140,18 +144,13 @@ func (b *azureSecretBackend) createSPSecret(ctx context.Context, s logical.Stora
 		Expiration: time.Now().Add(maxWALAge),
 	})
 	if err != nil {
-		return errwrap.Wrapf("error writing WAL: {{err}}", err)
+		return "", errwrap.Wrapf("error writing WAL: {{err}}", err)
 	}
 
 	// Create a service principal associated with the new App
 	sp, password, err := c.createSP(ctx, app, spExpiration)
 	if err != nil {
-		return err
-	}
-
-	// SP is fully created so delete the WAL
-	if err := framework.DeleteWAL(ctx, s, walID); err != nil {
-		return errwrap.Wrapf("error deleting WAL: {{err}}", err)
+		return "", err
 	}
 
 	role.ApplicationID = appID
@@ -161,7 +160,7 @@ func (b *azureSecretBackend) createSPSecret(ctx context.Context, s logical.Stora
 		Password: password,
 	}
 
-	return nil
+	return walID, nil
 }
 
 // createStaticSPSecret adds a new password to the App associated with the role.
