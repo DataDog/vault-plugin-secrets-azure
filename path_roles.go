@@ -326,9 +326,14 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 
 	if role.ApplicationType == applicationTypeDynamic {
 		if role.Credentials == nil {
-			err = b.createSPSecret(ctx, req.Storage, client, role)
+			walID, err := b.createSPSecret(ctx, req.Storage, client, role)
 			if err != nil {
 				return nil, err
+			}
+
+			// SP is fully created so delete the WAL
+			if err := framework.DeleteWAL(ctx, req.Storage, walID); err != nil {
+				return nil, errwrap.Wrapf("error deleting WAL: {{err}}", err)
 			}
 		}
 
