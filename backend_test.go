@@ -31,7 +31,11 @@ const (
 )
 
 func getTestBackend(t *testing.T, initConfig bool) (*azureSecretBackend, logical.Storage) {
-	b := backend()
+	b := backend(
+		&logical.BackendConfig{
+			StorageView: &logical.InmemStorage{},
+		},
+	)
 
 	config := &logical.BackendConfig{
 		Logger: logging.NewVaultLogger(log.Trace),

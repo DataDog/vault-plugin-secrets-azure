@@ -496,7 +496,11 @@ func TestCredentialInteg(t *testing.T) {
 	t.Run("SP", func(t *testing.T) {
 		t.Parallel()
 
-		b := backend()
+		b := backend(
+			&logical.BackendConfig{
+				StorageView: &logical.InmemStorage{},
+			},
+		)
 		s := new(logical.InmemStorage)
 		subscriptionID := os.Getenv("AZURE_SUBSCRIPTION_ID")
 
@@ -631,7 +635,11 @@ func TestCredentialInteg(t *testing.T) {
 	t.Run("Static SP", func(t *testing.T) {
 		t.Parallel()
 
-		b := backend()
+		b := backend(
+			&logical.BackendConfig{
+				StorageView: &logical.InmemStorage{},
+			},
+		)
 		s := new(logical.InmemStorage)
 
 		config := &logical.BackendConfig{
