@@ -70,6 +70,16 @@ func (b *azureSecretBackend) secretAccessTokenResponse(ctx context.Context, stor
 		return nil, err
 	}
 
+	if b.Logger().IsDebug() {
+		nacl, err := b.Salt(ctx)
+		if err != nil {
+			b.Logger().Error("error creating access token", "error", err)
+		}
+		hmac := nacl.GetIdentifiedHMAC(role.Credentials.Password)
+		b.Logger().Debug("retrieving Azure access token for application ID",
+			"client_id", role.ApplicationID, "client_secret", hmac, "key_id", role.Credentials.KeyId)
+	}
+
 	cc := azureauth.NewClientCredentialsConfig(role.ApplicationID, role.Credentials.Password, client.settings.TenantID)
 	cc.Resource = resource
 	token, err := b.getToken(ctx, client, cc)

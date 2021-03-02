@@ -8,11 +8,16 @@ import (
 
 	"github.com/hashicorp/vault/sdk/framework"
 	"github.com/hashicorp/vault/sdk/helper/locksutil"
+	"github.com/hashicorp/vault/sdk/helper/salt"
 	"github.com/hashicorp/vault/sdk/logical"
 )
 
 type azureSecretBackend struct {
 	*framework.Backend
+
+	view      logical.Storage
+	salt      *salt.Salt
+	saltMutex sync.RWMutex
 
 	getProvider func(*clientSettings) (AzureProvider, error)
 	client      *client
@@ -25,14 +30,14 @@ type azureSecretBackend struct {
 }
 
 func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
-	b := backend()
+	b := backend(conf)
 	if err := b.Setup(ctx, conf); err != nil {
 		return nil, err
 	}
 	return b, nil
 }
 
-func backend() *azureSecretBackend {
+func backend(conf *logical.BackendConfig) *azureSecretBackend {
 	var b = azureSecretBackend{}
 
 	b.Backend = &framework.Backend{
@@ -66,8 +71,32 @@ func backend() *azureSecretBackend {
 
 	b.getProvider = newAzureProvider
 	b.appLocks = locksutil.CreateLocks()
+	b.view = conf.StorageView
 
 	return &b
+}
+
+func (b *azureSecretBackend) Salt(ctx context.Context) (*salt.Salt, error) {
+	b.saltMutex.RLock()
+	if b.salt != nil {
+		defer b.saltMutex.RUnlock()
+		return b.salt, nil
+	}
+	b.saltMutex.RUnlock()
+	b.saltMutex.Lock()
+	defer b.saltMutex.Unlock()
+	if b.salt != nil {
+		return b.salt, nil
+	}
+	nacl, err := salt.NewSalt(ctx, b.view, &salt.Config{
+		HashFunc: salt.SHA256Hash,
+		Location: salt.DefaultLocation,
+	})
+	if err != nil {
+		return nil, err
+	}
+	b.salt = nacl
+	return nacl, nil
 }
 
 // reset clears the backend's cached client
@@ -85,6 +114,10 @@ func (b *azureSecretBackend) invalidate(ctx context.Context, key string) {
 	switch key {
 	case "config":
 		b.reset()
+	case salt.DefaultLocation:
+		b.saltMutex.Lock()
+		defer b.saltMutex.Unlock()
+		b.salt = nil
 	}
 }
 
