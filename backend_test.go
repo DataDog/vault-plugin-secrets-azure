@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/Azure/go-autorest/autorest"
 	azureadal "github.com/Azure/go-autorest/autorest/adal"
 	"github.com/Azure/go-autorest/autorest/azure/auth"
+	"github.com/Azure/go-autorest/autorest/date"
 	"github.com/Azure/go-autorest/autorest/to"
 	log "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/vault/sdk/helper/logging"
@@ -77,8 +79,9 @@ func getTestBackend(t *testing.T, initConfig bool) (*azureSecretBackend, logical
 type mockProvider struct {
 	subscriptionID            string
 	applications              map[string]bool
-	passwords                 map[string]bool
+	passwords                 map[string]passwordCredential
 	failNextCreateApplication bool
+	lock                      sync.Mutex
 }
 
 // errMockProvider simulates a normal provider which fails to associate a role,
@@ -112,7 +115,7 @@ func newErrMockProvider() AzureProvider {
 		mockProvider: &mockProvider{
 			subscriptionID: generateUUID(),
 			applications:   make(map[string]bool),
-			passwords:      make(map[string]bool),
+			passwords:      make(map[string]passwordCredential),
 		},
 	}
 }
@@ -121,7 +124,7 @@ func newMockProvider() AzureProvider {
 	return &mockProvider{
 		subscriptionID: generateUUID(),
 		applications:   make(map[string]bool),
-		passwords:      make(map[string]bool),
+		passwords:      make(map[string]passwordCredential),
 	}
 }
 
@@ -188,6 +191,10 @@ func (m *mockProvider) CreateApplication(ctx context.Context, parameters graphrb
 		return graphrbac.Application{}, errors.New("Mock: fail to create application")
 	}
 	appObjID := generateUUID()
+
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
 	m.applications[appObjID] = true
 
 	return graphrbac.Application{
@@ -207,25 +214,32 @@ func (m *mockProvider) DeleteApplication(ctx context.Context, applicationObjectI
 	return autorest.Response{}, nil
 }
 
-func (m *mockProvider) UpdateApplicationPasswordCredentials(ctx context.Context, applicationObjectID string, parameters graphrbac.PasswordCredentialsUpdateParameters) (result autorest.Response, err error) {
-	m.passwords = make(map[string]bool)
-	for _, v := range *parameters.Value {
-		m.passwords[*v.KeyID] = true
+func (m *mockProvider) AddApplicationPassword(ctx context.Context, applicationObjectID string, displayName string, endDateTime date.Time) (result PasswordCredentialResult, err error) {
+	keyID := generateUUID()
+	cred := passwordCredential{
+		DisplayName: to.StringPtr(displayName),
+		StartDate:   &date.Time{Time: time.Now()},
+		EndDate:     &endDateTime,
+		KeyID:       to.StringPtr(keyID),
+		SecretText:  to.StringPtr(generateUUID()),
 	}
 
-	return autorest.Response{}, nil
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	m.passwords[keyID] = cred
+
+	return PasswordCredentialResult{
+		passwordCredential: cred,
+	}, nil
 }
 
-func (m *mockProvider) ListApplicationPasswordCredentials(ctx context.Context, applicationObjectID string) (result graphrbac.PasswordCredentialListResult, err error) {
-	var creds []graphrbac.PasswordCredential
-	for keyID := range m.passwords {
-		kCopy := keyID
-		creds = append(creds, graphrbac.PasswordCredential{KeyID: &kCopy})
-	}
+func (m *mockProvider) RemoveApplicationPassword(background context.Context, applicationObjectID string, keyID string) (result autorest.Response, err error) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
 
-	return graphrbac.PasswordCredentialListResult{
-		Value: &creds,
-	}, nil
+	delete(m.passwords, keyID)
+
+	return autorest.Response{}, nil
 }
 
 func (m *mockProvider) appExists(s string) bool {
@@ -233,7 +247,8 @@ func (m *mockProvider) appExists(s string) bool {
 }
 
 func (m *mockProvider) passwordExists(s string) bool {
-	return m.passwords[s]
+	_, ok := m.passwords[s]
+	return ok
 }
 
 func (m *mockProvider) VMGet(ctx context.Context, resourceGroupName string, VMName string, expand compute.InstanceViewTypes) (result compute.VirtualMachine, err error) {

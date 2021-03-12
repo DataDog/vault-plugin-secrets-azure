@@ -271,8 +271,8 @@ func TestStaticSPRead(t *testing.T) {
 		assertErrorIsNil(t, err)
 
 		keyID := resp.Secret.InternalData["key_id"].(string)
-		if !strings.HasPrefix(keyID, "ffffff") {
-			t.Fatalf("expected prefix 'ffffff': %s", keyID)
+		if len(keyID) == 0 {
+			t.Fatalf("expected keyId to not be empty")
 		}
 
 		client, err := b.getClient(context.Background(), s)
@@ -415,8 +415,8 @@ func TestStaticSPRevoke(t *testing.T) {
 	assertErrorIsNil(t, err)
 
 	keyID := resp.Secret.InternalData["key_id"].(string)
-	if !strings.HasPrefix(keyID, "ffffff") {
-		t.Fatalf("expected prefix 'ffffff': %s", keyID)
+	if len(keyID) == 0 {
+		t.Fatalf("expected keyId to not be empty")
 	}
 
 	client, err := b.getClient(context.Background(), s)
