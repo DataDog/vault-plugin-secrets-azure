@@ -24,6 +24,149 @@ func newMSGraphApplicationClient(subscriptionId string) MSGraphApplicationClient
 	return MSGraphApplicationClient{authorization.NewWithBaseURI(defaultGraphMicrosoftComURI, subscriptionId)}
 }
 
+func (p *MSGraphApplicationClient) AddApplicationPassword(ctx context.Context, applicationObjectID string, displayName string, endDateTime date.Time) (result PasswordCredentialResult, err error) {
+	req, err := p.addPasswordPreparer(ctx, applicationObjectID, displayName, endDateTime)
+	if err != nil {
+		err = autorest.NewErrorWithError(err, "provider", "AddApplicationPassword", nil, "Failure preparing request")
+		return
+	}
+
+	resp, err := p.addPasswordSender(req)
+	if err != nil {
+		result.Response = autorest.Response{Response: resp}
+		err = autorest.NewErrorWithError(err, "provider", "AddApplicationPassword", resp, "Failure sending request")
+		return
+	}
+
+	result, err = p.addPasswordResponder(resp)
+	if err != nil {
+		err = autorest.NewErrorWithError(err, "provider", "AddApplicationPassword", resp, "Failure responding to request")
+	}
+
+	return
+}
+
+func (p *MSGraphApplicationClient) GetApplication(ctx context.Context, applicationObjectID string) (result ApplicationResult, err error) {
+	req, err := p.getApplicationPreparer(ctx, applicationObjectID)
+	if err != nil {
+		err = autorest.NewErrorWithError(err, "provider", "GetApplication", nil, "Failure preparing request")
+		return
+	}
+
+	resp, err := p.getApplicationSender(req)
+	if err != nil {
+		result.Response = autorest.Response{Response: resp}
+		err = autorest.NewErrorWithError(err, "provider", "GetApplication", resp, "Failure sending request")
+		return
+	}
+
+	result, err = p.getApplicationResponder(resp)
+	if err != nil {
+		err = autorest.NewErrorWithError(err, "provider", "GetApplication", resp, "Failure responding to request")
+	}
+
+	return
+}
+
+// CreateApplication create a new Azure application object.
+func (p *MSGraphApplicationClient) CreateApplication(ctx context.Context, displayName string) (result ApplicationResult, err error) {
+	req, err := p.createApplicationPreparer(ctx, displayName)
+	if err != nil {
+		err = autorest.NewErrorWithError(err, "provider", "CreateApplication", nil, "Failure preparing request")
+		return
+	}
+
+	resp, err := p.createApplicationSender(req)
+	if err != nil {
+		result.Response = autorest.Response{Response: resp}
+		err = autorest.NewErrorWithError(err, "provider", "CreateApplication", resp, "Failure sending request")
+		return
+	}
+
+	result, err = p.createApplicationResponder(resp)
+	if err != nil {
+		err = autorest.NewErrorWithError(err, "provider", "CreateApplication", resp, "Failure responding to request")
+	}
+
+	return
+}
+
+// DeleteApplication deletes an Azure application object.
+// This will in turn remove the service principal (but not the role assignments).
+func (p *MSGraphApplicationClient) DeleteApplication(ctx context.Context, applicationObjectID string) (result autorest.Response, err error) {
+	req, err := p.deleteApplicationPreparer(ctx, applicationObjectID)
+	if err != nil {
+		err = autorest.NewErrorWithError(err, "provider", "DeleteApplication", nil, "Failure preparing request")
+		return
+	}
+
+	resp, err := p.deleteApplicationSender(req)
+	if err != nil {
+		result.Response = resp
+		err = autorest.NewErrorWithError(err, "provider", "DeleteApplication", resp, "Failure sending request")
+		return
+	}
+
+	result, err = p.deleteApplicationResponder(resp)
+	if err != nil {
+		err = autorest.NewErrorWithError(err, "provider", "DeleteApplication", resp, "Failure responding to request")
+	}
+
+	return
+}
+
+func (p *MSGraphApplicationClient) RemoveApplicationPassword(ctx context.Context, applicationObjectID string, keyID string) (result autorest.Response, err error) {
+	req, err := p.removePasswordPreparer(ctx, applicationObjectID, keyID)
+	if err != nil {
+		err = autorest.NewErrorWithError(err, "provider", "RemoveApplicationPassword", nil, "Failure preparing request")
+		return
+	}
+
+	resp, err := p.removePasswordSender(req)
+	if err != nil {
+		result.Response = resp
+		err = autorest.NewErrorWithError(err, "provider", "RemoveApplicationPassword", resp, "Failure sending request")
+		return
+	}
+
+	result, err = p.removePasswordResponder(resp)
+	if err != nil {
+		err = autorest.NewErrorWithError(err, "provider", "RemoveApplicationPassword", resp, "Failure responding to request")
+	}
+
+	return
+}
+
+func (client MSGraphApplicationClient) getApplicationPreparer(ctx context.Context, applicationObjectID string) (*http.Request, error) {
+	pathParameters := map[string]interface{}{
+		"applicationObjectId": autorest.Encode("path", applicationObjectID),
+	}
+
+	preparer := autorest.CreatePreparer(
+		autorest.AsContentType("application/json; charset=utf-8"),
+		autorest.AsGet(),
+		autorest.WithBaseURL(client.BaseURI),
+		autorest.WithPathParameters("/v1.0/applications/{applicationObjectId}", pathParameters),
+		client.Authorizer.WithAuthorization())
+	return preparer.Prepare((&http.Request{}).WithContext(ctx))
+}
+
+func (client MSGraphApplicationClient) getApplicationSender(req *http.Request) (*http.Response, error) {
+	sd := autorest.GetSendDecorators(req.Context(), autorest.DoRetryForStatusCodes(client.RetryAttempts, client.RetryDuration, autorest.StatusCodesForRetry...))
+	return autorest.SendWithSender(client, req, sd...)
+}
+
+func (client MSGraphApplicationClient) getApplicationResponder(resp *http.Response) (result ApplicationResult, err error) {
+	err = autorest.Respond(
+		resp,
+		client.ByInspecting(),
+		azure.WithErrorUnlessStatusCode(http.StatusOK),
+		autorest.ByUnmarshallingJSON(&result),
+		autorest.ByClosing())
+	result.Response = autorest.Response{Response: resp}
+	return
+}
+
 func (client MSGraphApplicationClient) addPasswordPreparer(ctx context.Context, applicationObjectID string, displayName string, endDateTime date.Time) (*http.Request, error) {
 	pathParameters := map[string]interface{}{
 		"applicationObjectId": autorest.Encode("path", applicationObjectID),
@@ -101,6 +244,69 @@ func (client MSGraphApplicationClient) removePasswordResponder(resp *http.Respon
 	return
 }
 
+func (client MSGraphApplicationClient) createApplicationPreparer(ctx context.Context, displayName string) (*http.Request, error) {
+	parameters := struct {
+		DisplayName *string `json:"displayName"`
+	}{
+		DisplayName: to.StringPtr(displayName),
+	}
+
+	preparer := autorest.CreatePreparer(
+		autorest.AsContentType("application/json; charset=utf-8"),
+		autorest.AsPost(),
+		autorest.WithBaseURL(client.BaseURI),
+		autorest.WithPath("/v1.0/applications/{applicationObjectId}"),
+		autorest.WithJSON(parameters),
+		client.Authorizer.WithAuthorization())
+	return preparer.Prepare((&http.Request{}).WithContext(ctx))
+}
+
+func (client MSGraphApplicationClient) createApplicationSender(req *http.Request) (*http.Response, error) {
+	sd := autorest.GetSendDecorators(req.Context(), autorest.DoRetryForStatusCodes(client.RetryAttempts, client.RetryDuration, autorest.StatusCodesForRetry...))
+	return autorest.SendWithSender(client, req, sd...)
+}
+
+func (client MSGraphApplicationClient) createApplicationResponder(resp *http.Response) (result ApplicationResult, err error) {
+	err = autorest.Respond(
+		resp,
+		client.ByInspecting(),
+		azure.WithErrorUnlessStatusCode(http.StatusOK),
+		autorest.ByUnmarshallingJSON(&result),
+		autorest.ByClosing())
+	result.Response = autorest.Response{Response: resp}
+	return
+}
+
+func (client MSGraphApplicationClient) deleteApplicationPreparer(ctx context.Context, applicationObjectID string) (*http.Request, error) {
+	pathParameters := map[string]interface{}{
+		"applicationObjectId": autorest.Encode("path", applicationObjectID),
+	}
+
+	preparer := autorest.CreatePreparer(
+		autorest.AsContentType("application/json; charset=utf-8"),
+		autorest.AsDelete(),
+		autorest.WithBaseURL(client.BaseURI),
+		autorest.WithPathParameters("/v1.0/applications/{applicationObjectId}", pathParameters),
+		client.Authorizer.WithAuthorization())
+	return preparer.Prepare((&http.Request{}).WithContext(ctx))
+}
+
+func (client MSGraphApplicationClient) deleteApplicationSender(req *http.Request) (*http.Response, error) {
+	sd := autorest.GetSendDecorators(req.Context(), autorest.DoRetryForStatusCodes(client.RetryAttempts, client.RetryDuration, autorest.StatusCodesForRetry...))
+	return autorest.SendWithSender(client, req, sd...)
+}
+
+func (client MSGraphApplicationClient) deleteApplicationResponder(resp *http.Response) (result autorest.Response, err error) {
+	err = autorest.Respond(
+		resp,
+		client.ByInspecting(),
+		azure.WithErrorUnlessStatusCode(http.StatusNoContent),
+		autorest.ByUnmarshallingJSON(&result),
+		autorest.ByClosing())
+	result.Response = resp
+	return
+}
+
 type passwordCredential struct {
 	DisplayName *string `json:"displayName"`
 	// StartDate - Start date.
@@ -117,4 +323,12 @@ type PasswordCredentialResult struct {
 	autorest.Response `json:"-"`
 
 	passwordCredential
+}
+
+type ApplicationResult struct {
+	autorest.Response `json:"-"`
+
+	AppID               *string               `json:"appId,omitempty"`
+	ID                  *string               `json:"id,omitempty"`
+	PasswordCredentials []*passwordCredential `json:"passwordCredentials,omitempty"`
 }

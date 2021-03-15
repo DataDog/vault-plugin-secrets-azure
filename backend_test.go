@@ -54,7 +54,7 @@ func getTestBackend(t *testing.T, initConfig bool) (*azureSecretBackend, logical
 
 	b.settings = new(clientSettings)
 	mockProvider := newMockProvider()
-	b.getProvider = func(s *clientSettings) (AzureProvider, error) {
+	b.getProvider = func(s *clientSettings, usMsGraphApi bool, p passwords) (AzureProvider, error) {
 		return mockProvider, nil
 	}
 
@@ -81,7 +81,7 @@ type mockProvider struct {
 	applications              map[string]bool
 	passwords                 map[string]passwordCredential
 	failNextCreateApplication bool
-	lock                      sync.Mutex
+	lock                      sync.RWMutex
 }
 
 // errMockProvider simulates a normal provider which fails to associate a role,
@@ -99,15 +99,15 @@ func (e *errMockProvider) CreateRoleAssignment(ctx context.Context, scope string
 // key is found, unlike mockProvider which returns the same application object
 // id each time. Existing tests depend on the mockProvider behavior, which is
 // why errMockProvider has it's own version.
-func (e *errMockProvider) GetApplication(ctx context.Context, applicationObjectID string) (graphrbac.Application, error) {
+func (e *errMockProvider) GetApplication(ctx context.Context, applicationObjectID string) (ApplicationResult, error) {
 	for s := range e.applications {
 		if s == applicationObjectID {
-			return graphrbac.Application{
+			return ApplicationResult{
 				AppID: to.StringPtr(s),
 			}, nil
 		}
 	}
-	return graphrbac.Application{}, errors.New("not found")
+	return ApplicationResult{}, errors.New("not found")
 }
 
 func newErrMockProvider() AzureProvider {
@@ -185,10 +185,10 @@ func (m *mockProvider) CreateServicePrincipal(ctx context.Context, parameters gr
 	}, nil
 }
 
-func (m *mockProvider) CreateApplication(ctx context.Context, parameters graphrbac.ApplicationCreateParameters) (graphrbac.Application, error) {
+func (m *mockProvider) CreateApplication(ctx context.Context, displayName string) (ApplicationResult, error) {
 	if m.failNextCreateApplication {
 		m.failNextCreateApplication = false
-		return graphrbac.Application{}, errors.New("Mock: fail to create application")
+		return ApplicationResult{}, errors.New("Mock: fail to create application")
 	}
 	appObjID := generateUUID()
 
@@ -197,14 +197,14 @@ func (m *mockProvider) CreateApplication(ctx context.Context, parameters graphrb
 
 	m.applications[appObjID] = true
 
-	return graphrbac.Application{
-		AppID:    to.StringPtr(generateUUID()),
-		ObjectID: &appObjID,
+	return ApplicationResult{
+		AppID: to.StringPtr(generateUUID()),
+		ID:    &appObjID,
 	}, nil
 }
 
-func (m *mockProvider) GetApplication(ctx context.Context, applicationObjectID string) (graphrbac.Application, error) {
-	return graphrbac.Application{
+func (m *mockProvider) GetApplication(ctx context.Context, applicationObjectID string) (ApplicationResult, error) {
+	return ApplicationResult{
 		AppID: to.StringPtr("00000000-0000-0000-0000-000000000000"),
 	}, nil
 }
@@ -247,6 +247,8 @@ func (m *mockProvider) appExists(s string) bool {
 }
 
 func (m *mockProvider) passwordExists(s string) bool {
+	m.lock.RLock()
+	defer m.lock.RUnlock()
 	_, ok := m.passwords[s]
 	return ok
 }

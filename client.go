@@ -44,7 +44,7 @@ func (c *client) Valid() bool {
 // createApp creates a new Azure application.
 // An Application is a needed to create service principals used by
 // the caller for authentication.
-func (c *client) createApp(ctx context.Context) (app *graphrbac.Application, err error) {
+func (c *client) createApp(ctx context.Context) (app *ApplicationResult, err error) {
 	name, err := uuid.GenerateUUID()
 	if err != nil {
 		return nil, err
@@ -52,14 +52,7 @@ func (c *client) createApp(ctx context.Context) (app *graphrbac.Application, err
 
 	name = appNamePrefix + name
 
-	appURL := fmt.Sprintf("https://%s", name)
-
-	result, err := c.provider.CreateApplication(ctx, graphrbac.ApplicationCreateParameters{
-		AvailableToOtherTenants: to.BoolPtr(false),
-		DisplayName:             to.StringPtr(name),
-		Homepage:                to.StringPtr(appURL),
-		IdentifierUris:          to.StringSlicePtr([]string{appURL}),
-	})
+	result, err := c.provider.CreateApplication(ctx, name)
 
 	return &result, err
 }
@@ -67,7 +60,7 @@ func (c *client) createApp(ctx context.Context) (app *graphrbac.Application, err
 // createSP creates a new service principal.
 func (c *client) createSP(
 	ctx context.Context,
-	app *graphrbac.Application,
+	app *ApplicationResult,
 	duration time.Duration) (svcPrinc *graphrbac.ServicePrincipal, password string, err error) {
 
 	// Generate a random key (which must be a UUID) and password

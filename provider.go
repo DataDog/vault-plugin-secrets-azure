@@ -2,6 +2,10 @@ package azuresecrets
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/services/graphrbac/1.6/graphrbac"
 	"github.com/Azure/azure-sdk-for-go/services/preview/authorization/mgmt/2018-01-01-preview/authorization"
@@ -10,6 +14,9 @@ import (
 	"github.com/Azure/go-autorest/autorest/azure/auth"
 	azureauth "github.com/Azure/go-autorest/autorest/azure/auth"
 	"github.com/Azure/go-autorest/autorest/date"
+	"github.com/Azure/go-autorest/autorest/to"
+	"github.com/hashicorp/errwrap"
+	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/vault/sdk/helper/useragent"
 )
 
@@ -17,8 +24,7 @@ import (
 // Where practical the original function signature is preserved. client provides higher
 // level operations atop AzureProvider.
 type AzureProvider interface {
-	ApplicationsClient
-	MsGraphApplicationClient
+	ApplicationClient
 	ServicePrincipalsClient
 	ADGroupsClient
 	RoleAssignmentsClient
@@ -26,15 +32,12 @@ type AzureProvider interface {
 	AccessTokenClient
 }
 
-type MsGraphApplicationClient interface {
-	AddApplicationPassword(ctx context.Context, applicationObjectID string, displayName string, endDateTime date.Time) (result PasswordCredentialResult, err error)
-	RemoveApplicationPassword(background context.Context, applicationObjectID string, keyID string) (result autorest.Response, err error)
-}
-
-type ApplicationsClient interface {
-	CreateApplication(ctx context.Context, parameters graphrbac.ApplicationCreateParameters) (graphrbac.Application, error)
+type ApplicationClient interface {
+	GetApplication(ctx context.Context, applicationObjectID string) (result ApplicationResult, err error)
+	CreateApplication(ctx context.Context, displayName string) (result ApplicationResult, err error)
 	DeleteApplication(ctx context.Context, applicationObjectID string) (autorest.Response, error)
-	GetApplication(ctx context.Context, applicationObjectID string) (graphrbac.Application, error)
+	AddApplicationPassword(ctx context.Context, applicationObjectID string, displayName string, endDateTime date.Time) (result PasswordCredentialResult, err error)
+	RemoveApplicationPassword(ctx context.Context, applicationObjectID string, keyID string) (result autorest.Response, err error)
 }
 
 type ServicePrincipalsClient interface {
@@ -72,16 +75,15 @@ type AccessTokenClient interface {
 type provider struct {
 	settings *clientSettings
 
-	appClient        *graphrbac.ApplicationsClient
-	msGraphAppClient *MSGraphApplicationClient
-	spClient         *graphrbac.ServicePrincipalsClient
-	groupsClient     *graphrbac.GroupsClient
-	raClient         *authorization.RoleAssignmentsClient
-	rdClient         *authorization.RoleDefinitionsClient
+	appClient    ApplicationClient
+	spClient     *graphrbac.ServicePrincipalsClient
+	groupsClient *graphrbac.GroupsClient
+	raClient     *authorization.RoleAssignmentsClient
+	rdClient     *authorization.RoleDefinitionsClient
 }
 
 // newAzureProvider creates an azureProvider, backed by Azure client objects for underlying services.
-func newAzureProvider(settings *clientSettings) (AzureProvider, error) {
+func newAzureProvider(settings *clientSettings, useMsGraphApi bool, passwords passwords) (AzureProvider, error) {
 	// build clients that use the GraphRBAC endpoint
 	graphAuthorizer, err := getAuthorizer(settings, settings.Environment.GraphEndpoint)
 	if err != nil {
@@ -95,10 +97,6 @@ func newAzureProvider(settings *clientSettings) (AzureProvider, error) {
 		userAgent = useragent.String()
 	}
 
-	appClient := graphrbac.NewApplicationsClient(settings.TenantID)
-	appClient.Authorizer = graphAuthorizer
-	appClient.AddToUserAgent(userAgent)
-
 	spClient := graphrbac.NewServicePrincipalsClient(settings.TenantID)
 	spClient.Authorizer = graphAuthorizer
 	spClient.AddToUserAgent(userAgent)
@@ -107,14 +105,25 @@ func newAzureProvider(settings *clientSettings) (AzureProvider, error) {
 	groupsClient.Authorizer = graphAuthorizer
 	groupsClient.AddToUserAgent(userAgent)
 
-	graphApiAuthorizer, err := getAuthorizer(settings, defaultGraphMicrosoftComURI)
-	if err != nil {
-		return nil, err
-	}
+	var appClient ApplicationClient
+	if useMsGraphApi {
+		graphApiAuthorizer, err := getAuthorizer(settings, defaultGraphMicrosoftComURI)
+		if err != nil {
+			return nil, err
+		}
 
-	msGraphAppClient := newMSGraphApplicationClient(settings.SubscriptionID)
-	msGraphAppClient.Authorizer = graphApiAuthorizer
-	msGraphAppClient.AddToUserAgent(userAgent)
+		msGraphAppClient := newMSGraphApplicationClient(settings.SubscriptionID)
+		msGraphAppClient.Authorizer = graphApiAuthorizer
+		msGraphAppClient.AddToUserAgent(userAgent)
+
+		appClient = &msGraphAppClient
+	} else {
+		aadGraphClient := graphrbac.NewApplicationsClient(settings.TenantID)
+		aadGraphClient.Authorizer = graphAuthorizer
+		aadGraphClient.AddToUserAgent(userAgent)
+
+		appClient = &aadGraphApplicationClient{appClient: &aadGraphClient, passwords: passwords}
+	}
 
 	// build clients that use the Resource Manager endpoint
 	resourceManagerAuthorizer, err := getAuthorizer(settings, settings.Environment.ResourceManagerEndpoint)
@@ -133,12 +142,11 @@ func newAzureProvider(settings *clientSettings) (AzureProvider, error) {
 	p := &provider{
 		settings: settings,
 
-		appClient:        &appClient,
-		msGraphAppClient: &msGraphAppClient,
-		spClient:         &spClient,
-		groupsClient:     &groupsClient,
-		raClient:         &raClient,
-		rdClient:         &rdClient,
+		appClient:    appClient,
+		spClient:     &spClient,
+		groupsClient: &groupsClient,
+		raClient:     &raClient,
+		rdClient:     &rdClient,
 	}
 
 	return p, nil
@@ -169,18 +177,26 @@ func getAuthorizer(settings *clientSettings, resource string) (authorizer autore
 }
 
 // CreateApplication create a new Azure application object.
-func (p *provider) CreateApplication(ctx context.Context, parameters graphrbac.ApplicationCreateParameters) (graphrbac.Application, error) {
-	return p.appClient.Create(ctx, parameters)
+func (p *provider) CreateApplication(ctx context.Context, displayName string) (result ApplicationResult, err error) {
+	return p.appClient.CreateApplication(ctx, displayName)
 }
 
-func (p *provider) GetApplication(ctx context.Context, applicationObjectID string) (graphrbac.Application, error) {
-	return p.appClient.Get(ctx, applicationObjectID)
+func (p *provider) GetApplication(ctx context.Context, applicationObjectID string) (result ApplicationResult, err error) {
+	return p.appClient.GetApplication(ctx, applicationObjectID)
 }
 
 // DeleteApplication deletes an Azure application object.
 // This will in turn remove the service principal (but not the role assignments).
 func (p *provider) DeleteApplication(ctx context.Context, applicationObjectID string) (autorest.Response, error) {
-	return p.appClient.Delete(ctx, applicationObjectID)
+	return p.appClient.DeleteApplication(ctx, applicationObjectID)
+}
+
+func (p *provider) AddApplicationPassword(ctx context.Context, applicationObjectID string, displayName string, endDateTime date.Time) (result PasswordCredentialResult, err error) {
+	return p.appClient.AddApplicationPassword(ctx, applicationObjectID, displayName, endDateTime)
+}
+
+func (p *provider) RemoveApplicationPassword(ctx context.Context, applicationObjectID string, keyID string) (result autorest.Response, err error) {
+	return p.appClient.RemoveApplicationPassword(ctx, applicationObjectID, keyID)
 }
 
 // CreateServicePrincipal creates a new Azure service principal.
@@ -274,46 +290,133 @@ func (p *provider) GetToken(c azureauth.ClientCredentialsConfig) (azureadal.Toke
 	return t.Token(), nil
 }
 
-func (p *provider) AddApplicationPassword(ctx context.Context, applicationObjectID string, displayName string, endDateTime date.Time) (result PasswordCredentialResult, err error) {
-	req, err := p.msGraphAppClient.addPasswordPreparer(ctx, applicationObjectID, displayName, endDateTime)
-	if err != nil {
-		err = autorest.NewErrorWithError(err, "provider", "AddApplicationPassword", nil, "Failure preparing request")
-		return
-	}
-
-	resp, err := p.msGraphAppClient.addPasswordSender(req)
-	if err != nil {
-		result.Response = autorest.Response{Response: resp}
-		err = autorest.NewErrorWithError(err, "provider", "AddApplicationPassword", resp, "Failure sending request")
-		return
-	}
-
-	result, err = p.msGraphAppClient.addPasswordResponder(resp)
-	if err != nil {
-		err = autorest.NewErrorWithError(err, "provider", "AddApplicationPassword", resp, "Failure responding to request")
-	}
-
-	return
+type aadGraphApplicationClient struct {
+	appClient *graphrbac.ApplicationsClient
+	passwords passwords
 }
 
-func (p *provider) RemoveApplicationPassword(ctx context.Context, applicationObjectID string, keyID string) (result autorest.Response, err error) {
-	req, err := p.msGraphAppClient.removePasswordPreparer(ctx, applicationObjectID, keyID)
+func (a *aadGraphApplicationClient) GetApplication(ctx context.Context, applicationObjectID string) (result ApplicationResult, err error) {
+	app, err := a.appClient.Get(ctx, applicationObjectID)
 	if err != nil {
-		err = autorest.NewErrorWithError(err, "provider", "RemoveApplicationPassword", nil, "Failure preparing request")
-		return
+		return ApplicationResult{}, err
 	}
 
-	resp, err := p.msGraphAppClient.removePasswordSender(req)
+	return ApplicationResult{
+		AppID: app.AppID,
+		ID:    app.ObjectID,
+	}, nil
+}
+
+func (a *aadGraphApplicationClient) CreateApplication(ctx context.Context, displayName string) (result ApplicationResult, err error) {
+	appURL := fmt.Sprintf("https://%s", displayName)
+
+	app, err := a.appClient.Create(ctx, graphrbac.ApplicationCreateParameters{
+		AvailableToOtherTenants: to.BoolPtr(false),
+		DisplayName:             to.StringPtr(displayName),
+		Homepage:                to.StringPtr(appURL),
+		IdentifierUris:          to.StringSlicePtr([]string{appURL}),
+	})
 	if err != nil {
-		result.Response = resp
-		err = autorest.NewErrorWithError(err, "provider", "RemoveApplicationPassword", resp, "Failure sending request")
-		return
+		return ApplicationResult{}, err
 	}
 
-	result, err = p.msGraphAppClient.removePasswordResponder(resp)
+	return ApplicationResult{
+		AppID: app.AppID,
+		ID:    app.ObjectID,
+	}, nil
+}
+
+func (a *aadGraphApplicationClient) DeleteApplication(ctx context.Context, applicationObjectID string) (autorest.Response, error) {
+	return a.appClient.Delete(ctx, applicationObjectID)
+}
+
+func (a *aadGraphApplicationClient) AddApplicationPassword(ctx context.Context, applicationObjectID string, displayName string, endDateTime date.Time) (result PasswordCredentialResult, err error) {
+	keyID, err := uuid.GenerateUUID()
 	if err != nil {
-		err = autorest.NewErrorWithError(err, "provider", "RemoveApplicationPassword", resp, "Failure responding to request")
+		return PasswordCredentialResult{}, err
 	}
 
-	return
+	// Key IDs are not secret, and they're a convenient way for an operator to identify Vault-generated
+	// passwords. These must be UUIDs, so the three leading bytes will be used as an indicator.
+	keyID = "ffffff" + keyID[6:]
+
+	password, err := a.passwords.generate(ctx)
+	if err != nil {
+		return PasswordCredentialResult{}, err
+	}
+
+	now := date.Time{Time: time.Now().UTC()}
+	cred := graphrbac.PasswordCredential{
+		StartDate: &now,
+		EndDate:   &endDateTime,
+		KeyID:     to.StringPtr(keyID),
+		Value:     to.StringPtr(password),
+	}
+
+	// Load current credentials
+	resp, err := a.appClient.ListPasswordCredentials(ctx, applicationObjectID)
+	if err != nil {
+		return PasswordCredentialResult{}, errwrap.Wrapf("error fetching credentials: {{err}}", err)
+	}
+	curCreds := *resp.Value
+
+	// Add and save credentials
+	curCreds = append(curCreds, cred)
+
+	if _, err := a.appClient.UpdatePasswordCredentials(ctx, applicationObjectID,
+		graphrbac.PasswordCredentialsUpdateParameters{
+			Value: &curCreds,
+		},
+	); err != nil {
+		if strings.Contains(err.Error(), "size of the object has exceeded its limit") {
+			err = errors.New("maximum number of Application passwords reached")
+		}
+		return PasswordCredentialResult{}, errwrap.Wrapf("error updating credentials: {{err}}", err)
+	}
+
+	return PasswordCredentialResult{
+		passwordCredential: passwordCredential{
+			DisplayName: to.StringPtr(displayName),
+			StartDate:   &now,
+			EndDate:     &endDateTime,
+			KeyID:       to.StringPtr(keyID),
+			SecretText:  to.StringPtr(password),
+		},
+	}, nil
+}
+
+func (a *aadGraphApplicationClient) RemoveApplicationPassword(ctx context.Context, applicationObjectID string, keyID string) (result autorest.Response, err error) {
+	// Load current credentials
+	resp, err := a.appClient.ListPasswordCredentials(ctx, applicationObjectID)
+	if err != nil {
+		return autorest.Response{}, errwrap.Wrapf("error fetching credentials: {{err}}", err)
+	}
+	curCreds := *resp.Value
+
+	// Remove credential
+	found := false
+	for i := range curCreds {
+		if to.String(curCreds[i].KeyID) == keyID {
+			curCreds[i] = curCreds[len(curCreds)-1]
+			curCreds = curCreds[:len(curCreds)-1]
+			found = true
+			break
+		}
+	}
+
+	// KeyID is not present, so nothing to do
+	if !found {
+		return autorest.Response{}, nil
+	}
+
+	// Save new credentials list
+	if _, err := a.appClient.UpdatePasswordCredentials(ctx, applicationObjectID,
+		graphrbac.PasswordCredentialsUpdateParameters{
+			Value: &curCreds,
+		},
+	); err != nil {
+		return autorest.Response{}, errwrap.Wrapf("error updating credentials: {{err}}", err)
+	}
+
+	return autorest.Response{}, nil
 }

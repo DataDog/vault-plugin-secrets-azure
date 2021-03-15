@@ -59,7 +59,7 @@ func TestSP_WAL_Cleanup(t *testing.T) {
 
 	// overwrite the normal test backend provider with the errMockProvider
 	errMockProvider := newErrMockProvider()
-	b.getProvider = func(s *clientSettings) (AzureProvider, error) {
+	b.getProvider = func(s *clientSettings, usMsGraphApi bool, p passwords) (AzureProvider, error) {
 		return errMockProvider, nil
 	}
 
@@ -743,7 +743,7 @@ func TestCredentialInteg(t *testing.T) {
 		for i := 0; i < 8; i++ {
 			// New credentials are only tested during an actual operation, not provider creation.
 			// This step should never fail.
-			p, err := newAzureProvider(settings)
+			p, err := newAzureProvider(settings, true, passwords{})
 			if err != nil {
 				t.Fatal(err)
 			}

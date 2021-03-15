@@ -19,7 +19,7 @@ type azureSecretBackend struct {
 	salt      *salt.Salt
 	saltMutex sync.RWMutex
 
-	getProvider func(*clientSettings) (AzureProvider, error)
+	getProvider func(*clientSettings, bool, passwords) (AzureProvider, error)
 	client      *client
 	settings    *clientSettings
 	lock        sync.RWMutex
@@ -155,14 +155,14 @@ func (b *azureSecretBackend) getClient(ctx context.Context, s logical.Storage) (
 		b.settings = settings
 	}
 
-	p, err := b.getProvider(b.settings)
-	if err != nil {
-		return nil, err
-	}
-
 	passwords := passwords{
 		policyGenerator: b.System(),
 		policyName:      config.PasswordPolicy,
+	}
+
+	p, err := b.getProvider(b.settings, config.UseMsGraphAPI, passwords)
+	if err != nil {
+		return nil, err
 	}
 
 	c := &client{
