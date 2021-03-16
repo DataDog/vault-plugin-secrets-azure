@@ -255,7 +255,7 @@ func (client MSGraphApplicationClient) createApplicationPreparer(ctx context.Con
 		autorest.AsContentType("application/json; charset=utf-8"),
 		autorest.AsPost(),
 		autorest.WithBaseURL(client.BaseURI),
-		autorest.WithPath("/v1.0/applications/{applicationObjectId}"),
+		autorest.WithPath("/v1.0/applications"),
 		autorest.WithJSON(parameters),
 		client.Authorizer.WithAuthorization())
 	return preparer.Prepare((&http.Request{}).WithContext(ctx))
@@ -270,7 +270,7 @@ func (client MSGraphApplicationClient) createApplicationResponder(resp *http.Res
 	err = autorest.Respond(
 		resp,
 		client.ByInspecting(),
-		azure.WithErrorUnlessStatusCode(http.StatusOK),
+		azure.WithErrorUnlessStatusCode(http.StatusCreated),
 		autorest.ByUnmarshallingJSON(&result),
 		autorest.ByClosing())
 	result.Response = autorest.Response{Response: resp}
