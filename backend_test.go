@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/Azure/go-autorest/autorest"
 	azureadal "github.com/Azure/go-autorest/autorest/adal"
 	"github.com/Azure/go-autorest/autorest/azure/auth"
+	"github.com/Azure/go-autorest/autorest/date"
 	"github.com/Azure/go-autorest/autorest/to"
 	log "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/vault/sdk/helper/logging"
@@ -52,7 +54,7 @@ func getTestBackend(t *testing.T, initConfig bool) (*azureSecretBackend, logical
 
 	b.settings = new(clientSettings)
 	mockProvider := newMockProvider()
-	b.getProvider = func(s *clientSettings) (AzureProvider, error) {
+	b.getProvider = func(s *clientSettings, usMsGraphApi bool, p passwords) (AzureProvider, error) {
 		return mockProvider, nil
 	}
 
@@ -77,8 +79,9 @@ func getTestBackend(t *testing.T, initConfig bool) (*azureSecretBackend, logical
 type mockProvider struct {
 	subscriptionID            string
 	applications              map[string]bool
-	passwords                 map[string]bool
+	passwords                 map[string]passwordCredential
 	failNextCreateApplication bool
+	lock                      sync.RWMutex
 }
 
 // errMockProvider simulates a normal provider which fails to associate a role,
@@ -96,15 +99,15 @@ func (e *errMockProvider) CreateRoleAssignment(ctx context.Context, scope string
 // key is found, unlike mockProvider which returns the same application object
 // id each time. Existing tests depend on the mockProvider behavior, which is
 // why errMockProvider has it's own version.
-func (e *errMockProvider) GetApplication(ctx context.Context, applicationObjectID string) (graphrbac.Application, error) {
+func (e *errMockProvider) GetApplication(ctx context.Context, applicationObjectID string) (ApplicationResult, error) {
 	for s := range e.applications {
 		if s == applicationObjectID {
-			return graphrbac.Application{
+			return ApplicationResult{
 				AppID: to.StringPtr(s),
 			}, nil
 		}
 	}
-	return graphrbac.Application{}, errors.New("not found")
+	return ApplicationResult{}, errors.New("not found")
 }
 
 func newErrMockProvider() AzureProvider {
@@ -112,7 +115,7 @@ func newErrMockProvider() AzureProvider {
 		mockProvider: &mockProvider{
 			subscriptionID: generateUUID(),
 			applications:   make(map[string]bool),
-			passwords:      make(map[string]bool),
+			passwords:      make(map[string]passwordCredential),
 		},
 	}
 }
@@ -121,7 +124,7 @@ func newMockProvider() AzureProvider {
 	return &mockProvider{
 		subscriptionID: generateUUID(),
 		applications:   make(map[string]bool),
-		passwords:      make(map[string]bool),
+		passwords:      make(map[string]passwordCredential),
 	}
 }
 
@@ -182,22 +185,26 @@ func (m *mockProvider) CreateServicePrincipal(ctx context.Context, parameters gr
 	}, nil
 }
 
-func (m *mockProvider) CreateApplication(ctx context.Context, parameters graphrbac.ApplicationCreateParameters) (graphrbac.Application, error) {
+func (m *mockProvider) CreateApplication(ctx context.Context, displayName string) (ApplicationResult, error) {
 	if m.failNextCreateApplication {
 		m.failNextCreateApplication = false
-		return graphrbac.Application{}, errors.New("Mock: fail to create application")
+		return ApplicationResult{}, errors.New("Mock: fail to create application")
 	}
 	appObjID := generateUUID()
+
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
 	m.applications[appObjID] = true
 
-	return graphrbac.Application{
-		AppID:    to.StringPtr(generateUUID()),
-		ObjectID: &appObjID,
+	return ApplicationResult{
+		AppID: to.StringPtr(generateUUID()),
+		ID:    &appObjID,
 	}, nil
 }
 
-func (m *mockProvider) GetApplication(ctx context.Context, applicationObjectID string) (graphrbac.Application, error) {
-	return graphrbac.Application{
+func (m *mockProvider) GetApplication(ctx context.Context, applicationObjectID string) (ApplicationResult, error) {
+	return ApplicationResult{
 		AppID: to.StringPtr("00000000-0000-0000-0000-000000000000"),
 	}, nil
 }
@@ -207,25 +214,32 @@ func (m *mockProvider) DeleteApplication(ctx context.Context, applicationObjectI
 	return autorest.Response{}, nil
 }
 
-func (m *mockProvider) UpdateApplicationPasswordCredentials(ctx context.Context, applicationObjectID string, parameters graphrbac.PasswordCredentialsUpdateParameters) (result autorest.Response, err error) {
-	m.passwords = make(map[string]bool)
-	for _, v := range *parameters.Value {
-		m.passwords[*v.KeyID] = true
+func (m *mockProvider) AddApplicationPassword(ctx context.Context, applicationObjectID string, displayName string, endDateTime date.Time) (result PasswordCredentialResult, err error) {
+	keyID := generateUUID()
+	cred := passwordCredential{
+		DisplayName: to.StringPtr(displayName),
+		StartDate:   &date.Time{Time: time.Now()},
+		EndDate:     &endDateTime,
+		KeyID:       to.StringPtr(keyID),
+		SecretText:  to.StringPtr(generateUUID()),
 	}
 
-	return autorest.Response{}, nil
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	m.passwords[keyID] = cred
+
+	return PasswordCredentialResult{
+		passwordCredential: cred,
+	}, nil
 }
 
-func (m *mockProvider) ListApplicationPasswordCredentials(ctx context.Context, applicationObjectID string) (result graphrbac.PasswordCredentialListResult, err error) {
-	var creds []graphrbac.PasswordCredential
-	for keyID := range m.passwords {
-		kCopy := keyID
-		creds = append(creds, graphrbac.PasswordCredential{KeyID: &kCopy})
-	}
+func (m *mockProvider) RemoveApplicationPassword(background context.Context, applicationObjectID string, keyID string) (result autorest.Response, err error) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
 
-	return graphrbac.PasswordCredentialListResult{
-		Value: &creds,
-	}, nil
+	delete(m.passwords, keyID)
+
+	return autorest.Response{}, nil
 }
 
 func (m *mockProvider) appExists(s string) bool {
@@ -233,7 +247,10 @@ func (m *mockProvider) appExists(s string) bool {
 }
 
 func (m *mockProvider) passwordExists(s string) bool {
-	return m.passwords[s]
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+	_, ok := m.passwords[s]
+	return ok
 }
 
 func (m *mockProvider) VMGet(ctx context.Context, resourceGroupName string, VMName string, expand compute.InstanceViewTypes) (result compute.VirtualMachine, err error) {
