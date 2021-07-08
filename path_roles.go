@@ -337,14 +337,20 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 			}
 		}
 
-		err = b.configureRoles(ctx, client, role, requestedRoles)
+		err, warn := b.configureRoles(ctx, client, role, requestedRoles)
 		if err != nil {
 			return nil, err
 		}
+		if warn != nil {
+			resp.AddWarning(warn.Error())
+		}
 
-		err = b.configureGroups(ctx, client, role, requestedGroups)
+		err, warn = b.configureGroups(ctx, client, role, requestedGroups)
 		if err != nil {
 			return nil, err
+		}
+		if warn != nil {
+			resp.AddWarning(warn.Error())
 		}
 	} else if role.ApplicationType == applicationTypeStatic {
 		if role.Credentials == nil {
@@ -366,40 +372,40 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 	return resp, nil
 }
 
-func (b *azureSecretBackend) configureGroups(ctx context.Context, client *client, role *roleEntry, requestedGroups []*AzureGroup) error {
+func (b *azureSecretBackend) configureGroups(ctx context.Context, client *client, role *roleEntry, requestedGroups []*AzureGroup) (err error, warn error) {
 	groupsToAdd := groupSetDifference(requestedGroups, role.AzureGroups)
 	groupsToRemove := groupSetDifference(role.AzureGroups, requestedGroups)
 
-	err := client.addGroupMemberships(ctx, role.ServicePrincipalID, groupsToAdd)
+	err = client.addGroupMemberships(ctx, role.ServicePrincipalID, groupsToAdd)
 	if err != nil {
-		return err
+		return
 	}
 
-	err = client.removeGroupMemberships(ctx, role.ServicePrincipalID, groupsToRemove)
-	if err != nil {
-		return err
+	warn = client.removeGroupMemberships(ctx, role.ServicePrincipalID, groupsToRemove)
+	if warn != nil {
+		return
 	}
 
 	role.AzureGroups = requestedGroups
-	return nil
+	return
 }
 
-func (b *azureSecretBackend) configureRoles(ctx context.Context, client *client, role *roleEntry, requestedRoles []*AzureRole) error {
+func (b *azureSecretBackend) configureRoles(ctx context.Context, client *client, role *roleEntry, requestedRoles []*AzureRole) (err error, warn error) {
 	rolesToAdd := roleSetDifference(requestedRoles, role.AzureRoles)
 	rolesToRemove := roleSetDifference(role.AzureRoles, requestedRoles)
 
-	_, err := client.assignRoles(ctx, role.ServicePrincipalID, rolesToAdd)
+	_, err = client.assignRoles(ctx, role.ServicePrincipalID, rolesToAdd)
 	if err != nil {
-		return err
+		return
 	}
 
-	err = client.unassignRoles(ctx, rolesToRemove)
-	if err != nil {
-		return err
+	warn = client.unassignRoles(ctx, rolesToRemove)
+	if warn != nil {
+		return
 	}
 
 	role.AzureRoles = requestedRoles
-	return nil
+	return
 }
 
 func (b *azureSecretBackend) pathRoleRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
