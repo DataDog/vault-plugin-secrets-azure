@@ -268,7 +268,7 @@ func (b *azureSecretBackend) spRemove(ctx context.Context, req *logical.Request,
 	// operation. Errors will be noted but won't fail the revocation process.
 	// Deleting the app, however, *is* required to consider the secret revoked.
 	if err := c.removeGroupMemberships(ctx, role.ServicePrincipalID, role.AzureGroups); err != nil {
-		return nil, err
+		resp.AddWarning(err.Error())
 	}
 
 	err = c.deleteApp(ctx, role.ApplicationObjectID)
