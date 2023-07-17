@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package azuresecrets
 
 import (
@@ -13,10 +16,17 @@ import (
 	"github.com/hashicorp/vault/sdk/logical"
 )
 
+const (
+	userAgentPluginName = "secrets-azure"
+
+	// operationPrefixAzure is used as a prefix for OpenAPI operation id's.
+	operationPrefixAzure = "azure"
+)
+
 type azureSecretBackend struct {
 	*framework.Backend
 
-	getProvider func(*clientSettings, bool, api.Passwords) (api.AzureProvider, error)
+	getProvider func(*clientSettings, api.Passwords) (api.AzureProvider, error)
 	client      *client
 	settings    *clientSettings
 	lock        sync.RWMutex
@@ -211,7 +221,7 @@ func (b *azureSecretBackend) getClient(ctx context.Context, s logical.Storage) (
 		PolicyName:      config.PasswordPolicy,
 	}
 
-	p, err := b.getProvider(b.settings, config.UseMsGraphAPI, passwords)
+	p, err := b.getProvider(b.settings, passwords)
 	if err != nil {
 		return nil, err
 	}

@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package azuresecrets
 
 import (
@@ -30,6 +33,14 @@ type roleEntry struct {
 	ApplicationObjectID string        `json:"application_object_id"`
 	TTL                 time.Duration `json:"ttl"`
 	MaxTTL              time.Duration `json:"max_ttl"`
+	PermanentlyDelete   bool          `json:"permanently_delete"`
+	PersistApp          bool          `json:"persist_app"`
+
+	// Info for persisted apps
+	RoleAssignmentIDs          []string `json:"role_assignment_ids"`
+	GroupMembershipIDs         []string `json:"group_membership_ids"`
+	ServicePrincipalObjectID   string   `json:"sp_object_id"`
+	ManagedApplicationObjectID string   `json:"managed_application_object_id"`
 }
 
 // AzureRole is an Azure Role (https://docs.microsoft.com/en-us/azure/role-based-access-control/overview) applied
@@ -55,6 +66,10 @@ func pathsRole(b *azureSecretBackend) []*framework.Path {
 	return []*framework.Path{
 		{
 			Pattern: "roles/" + framework.GenericNameRegex("name"),
+			DisplayAttrs: &framework.DisplayAttributes{
+				OperationPrefix: operationPrefixAzure,
+				OperationSuffix: "role",
+			},
 			Fields: map[string]*framework.FieldSchema{
 				"name": {
 					Type:        framework.TypeLowerCaseString,
@@ -80,6 +95,16 @@ func pathsRole(b *azureSecretBackend) []*framework.Path {
 					Type:        framework.TypeDurationSecond,
 					Description: "Maximum time a service principal. If not set or set to 0, will use system default.",
 				},
+				"permanently_delete": {
+					Type:        framework.TypeBool,
+					Description: "Indicates whether new application objects should be permanently deleted. If not set, objects will not be permanently deleted.",
+					Default:     false,
+				},
+				"persist_app": {
+					Type:        framework.TypeBool,
+					Description: "Persist the app between generated credentials. Useful if the app needs to maintain owner ship of resources it creates",
+					Default:     false,
+				},
 			},
 			Callbacks: map[logical.Operation]framework.OperationFunc{
 				logical.ReadOperation:   b.pathRoleRead,
@@ -93,6 +118,10 @@ func pathsRole(b *azureSecretBackend) []*framework.Path {
 		},
 		{
 			Pattern: "roles/?",
+			DisplayAttrs: &framework.DisplayAttributes{
+				OperationPrefix: operationPrefixAzure,
+				OperationSuffix: "roles",
+			},
 			Callbacks: map[logical.Operation]framework.OperationFunc{
 				logical.ListOperation: b.pathRoleList,
 			},
@@ -114,13 +143,14 @@ func pathsRole(b *azureSecretBackend) []*framework.Path {
 //   Given just role name, a search will be performed and if exactly one match is found,
 //   that role will be used.
 
-//   Azure groups are checked for existence. The Azure groups lookup step will allow the
-//   operator to provide a groups name or ID. ID is unambigious and will be used if provided.
-//   Given just group name, a search will be performed and if exactly one match is found,
-//   that group will be used.
+//	Azure groups are checked for existence. The Azure groups lookup step will allow the
+//	operator to provide a groups name or ID. ID is unambigious and will be used if provided.
+//	Given just group name, a search will be performed and if exactly one match is found,
+//	that group will be used.
 //
 // Static Service Principal:
-//   The provided Application Object ID is checked for existence.
+//
+//	The provided Application Object ID is checked for existence.
 func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	var resp *logical.Response
 
@@ -171,6 +201,13 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 		return logical.ErrorResponse("ttl cannot be greater than max_ttl"), nil
 	}
 
+	// load and verify deletion options
+	if permanentlyDeleteRaw, ok := d.GetOk("permanently_delete"); ok {
+		role.PermanentlyDelete = permanentlyDeleteRaw.(bool)
+	} else {
+		role.PermanentlyDelete = false
+	}
+
 	// update and verify Application Object ID if provided
 	if appObjectID, ok := d.GetOk("application_object_id"); ok {
 		role.ApplicationObjectID = appObjectID.(string)
@@ -182,6 +219,19 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 			return nil, fmt.Errorf("error loading Application: %w", err)
 		}
 		role.ApplicationID = to.String(app.AppID)
+
+		if role.PermanentlyDelete {
+			return logical.ErrorResponse("permanently_delete must be false if application_object_id is provided"), nil
+		}
+	}
+
+	// update and verify Application Object ID if provided
+	if persistApp, ok := d.GetOk("persist_app"); ok {
+		role.PersistApp = persistApp.(bool)
+		// set the applicationObjectID to the managedApplicationObjectID so that we can use the same SP logic as static.
+		if role.PersistApp {
+			role.ApplicationObjectID = role.ManagedApplicationObjectID
+		}
 	}
 
 	// Parse the Azure roles
@@ -281,13 +331,103 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 		return logical.ErrorResponse("either Azure role definitions, group definitions, or an Application Object ID must be provided"), nil
 	}
 
+	// If persisted create the app
+	if role.PersistApp {
+		err := b.createPersistedApp(ctx, req, role, name)
+		if err != nil {
+			return nil, fmt.Errorf("could not create persisted app: %w", err)
+		}
+
+	}
+
 	// save role
 	err = saveRole(ctx, req.Storage, role, name)
 	if err != nil {
 		return nil, fmt.Errorf("error storing role: %w", err)
 	}
 
-	return addAADWarning(resp, config), nil
+	return resp, nil
+}
+
+func (b *azureSecretBackend) createPersistedApp(ctx context.Context, req *logical.Request, role *roleEntry, name string) error {
+
+	c, err := b.getClient(ctx, req.Storage)
+	if err != nil {
+		return err
+	}
+
+	assignmentIDs, err := c.generateUUIDs(len(role.AzureRoles))
+	if err != nil {
+		return fmt.Errorf("error generating assginment IDs; err=%w", err)
+	}
+
+	if role.ManagedApplicationObjectID != "" {
+		removeRolesAndGroupMembership(ctx, c, role)
+
+		spObjID := role.ServicePrincipalObjectID
+
+		// Assign Azure roles to the new SP
+		raIDs, err := c.assignRoles(ctx, spObjID, role.AzureRoles, assignmentIDs)
+		if err != nil {
+			return err
+		}
+		role.RoleAssignmentIDs = raIDs
+
+		// Assign Azure group memberships to the new SP
+		if err := c.addGroupMemberships(ctx, spObjID, role.AzureGroups); err != nil {
+			return err
+		}
+		role.GroupMembershipIDs = groupObjectIDs(role.AzureGroups)
+
+		return nil
+	}
+
+	app, err := c.createAppWithName(ctx, name)
+	if err != nil {
+		return err
+	}
+	appID := to.String(app.AppID)
+	appObjID := to.String(app.ID)
+	// Write a WAL entry in case the SP create process doesn't complete
+	walID, err := framework.PutWAL(ctx, req.Storage, walAppKey, &walApp{
+		AppID:      appID,
+		AppObjID:   appObjID,
+		Expiration: time.Now().Add(maxWALAge),
+	})
+	if err != nil {
+		return fmt.Errorf("error writing WAL: %w", err)
+	}
+
+	// TODO: should we expire the PW?
+	spObjID, _, err := c.createSP(ctx, app, spExpiration)
+	if err != nil {
+		return err
+	}
+	role.ServicePrincipalObjectID = spObjID
+
+	// Assign Azure roles to the new SP
+	raIDs, err := c.assignRoles(ctx, spObjID, role.AzureRoles, assignmentIDs)
+	if err != nil {
+		return err
+	}
+	role.RoleAssignmentIDs = raIDs
+
+	// Assign Azure group memberships to the new SP
+	if err := c.addGroupMemberships(ctx, spObjID, role.AzureGroups); err != nil {
+		return err
+	}
+	role.GroupMembershipIDs = groupObjectIDs(role.AzureGroups)
+
+	// SP is fully created so delete the WAL
+	if err := framework.DeleteWAL(ctx, req.Storage, walID); err != nil {
+		return fmt.Errorf("error deleting WAL: %w", err)
+	}
+
+	role.ManagedApplicationObjectID = appObjID
+	role.ApplicationObjectID = appObjID
+	role.ApplicationID = appID
+
+	return nil
 }
 
 func (b *azureSecretBackend) pathRoleRead(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
@@ -318,9 +458,11 @@ func (b *azureSecretBackend) pathRoleRead(ctx context.Context, req *logical.Requ
 			"azure_roles":           r.AzureRoles,
 			"azure_groups":          r.AzureGroups,
 			"application_object_id": r.ApplicationObjectID,
+			"permanently_delete":    r.PermanentlyDelete,
+			"persist_app":           r.PersistApp,
 		},
 	}
-	return addAADWarning(resp, config), nil
+	return resp, nil
 }
 
 func (b *azureSecretBackend) pathRoleList(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
@@ -333,14 +475,39 @@ func (b *azureSecretBackend) pathRoleList(ctx context.Context, req *logical.Requ
 }
 
 func (b *azureSecretBackend) pathRoleDelete(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	name := d.Get("name").(string)
+	var resp *logical.Response
 
-	err := req.Storage.Delete(ctx, fmt.Sprintf("%s/%s", rolesStoragePath, name))
+	name := d.Get("name").(string)
+	role, err := getRole(ctx, name, req.Storage)
+	if err != nil {
+		return nil, fmt.Errorf("error getting role: %w", err)
+	}
+
+	if role != nil && role.PersistApp {
+		c, err := b.getClient(ctx, req.Storage)
+		if err != nil {
+			return nil, fmt.Errorf("error during delete: %w", err)
+		}
+
+		// unassigning roles and removing group membership is effectively a garbage collection operation.
+		// Errors will be noted but won't fail the revocation process.
+		// Deleting the app, however, *is* required to consider the secret revoked.
+		if err := removeRolesAndGroupMembership(ctx, c, role); err != nil {
+			resp = new(logical.Response)
+			resp.AddWarning(err.Error())
+		}
+
+		if err = c.deleteApp(ctx, role.ApplicationObjectID, role.PermanentlyDelete); err != nil {
+			return nil, fmt.Errorf("error deleting persisted app: %w", err)
+		}
+	}
+
+	err = req.Storage.Delete(ctx, fmt.Sprintf("%s/%s", rolesStoragePath, name))
 	if err != nil {
 		return nil, fmt.Errorf("error deleting role: %w", err)
 	}
 
-	return nil, nil
+	return resp, nil
 }
 
 func (b *azureSecretBackend) pathRoleExistenceCheck(ctx context.Context, req *logical.Request, d *framework.FieldData) (bool, error) {
@@ -352,6 +519,19 @@ func (b *azureSecretBackend) pathRoleExistenceCheck(ctx context.Context, req *lo
 	}
 
 	return role != nil, nil
+}
+
+func removeRolesAndGroupMembership(ctx context.Context, c *client, role *roleEntry) error {
+	// Unassign roles
+	if err := c.unassignRoles(ctx, role.RoleAssignmentIDs); err != nil {
+		return err
+	}
+	// Removing group membership
+	if err := c.removeGroupMemberships(ctx, role.ServicePrincipalObjectID, role.GroupMembershipIDs); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func saveRole(ctx context.Context, s logical.Storage, c *roleEntry, name string) error {

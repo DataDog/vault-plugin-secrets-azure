@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package azuresecrets
 
 import (
@@ -34,7 +37,6 @@ type azureConfig struct {
 	NewClientSecretKeyID          string        `json:"new_client_secret_key_id"`
 	Environment                   string        `json:"environment"`
 	PasswordPolicy                string        `json:"password_policy"`
-	UseMsGraphAPI                 bool          `json:"use_microsoft_graph_api"`
 	RootPasswordTTL               time.Duration `json:"root_password_ttl"`
 	RootPasswordExpirationDate    time.Time     `json:"root_password_expiration_date"`
 }
@@ -42,42 +44,40 @@ type azureConfig struct {
 func pathConfig(b *azureSecretBackend) *framework.Path {
 	return &framework.Path{
 		Pattern: "config",
+		DisplayAttrs: &framework.DisplayAttributes{
+			OperationPrefix: operationPrefixAzure,
+		},
 		Fields: map[string]*framework.FieldSchema{
-			"subscription_id": &framework.FieldSchema{
+			"subscription_id": {
 				Type: framework.TypeString,
 				Description: `The subscription id for the Azure Active Directory.
 				This value can also be provided with the AZURE_SUBSCRIPTION_ID environment variable.`,
 			},
-			"tenant_id": &framework.FieldSchema{
+			"tenant_id": {
 				Type: framework.TypeString,
 				Description: `The tenant id for the Azure Active Directory. This value can also
 				be provided with the AZURE_TENANT_ID environment variable.`,
 			},
-			"environment": &framework.FieldSchema{
+			"environment": {
 				Type: framework.TypeString,
 				Description: `The Azure environment name. If not provided, AzurePublicCloud is used.
 				This value can also be provided with the AZURE_ENVIRONMENT environment variable.`,
 			},
-			"client_id": &framework.FieldSchema{
+			"client_id": {
 				Type: framework.TypeString,
 				Description: `The OAuth2 client id to connect to Azure.
 				This value can also be provided with the AZURE_CLIENT_ID environment variable.`,
 			},
-			"client_secret": &framework.FieldSchema{
+			"client_secret": {
 				Type: framework.TypeString,
 				Description: `The OAuth2 client secret to connect to Azure.
 				This value can also be provided with the AZURE_CLIENT_SECRET environment variable.`,
 			},
-			"password_policy": &framework.FieldSchema{
+			"password_policy": {
 				Type:        framework.TypeString,
 				Description: "Name of the password policy to use to generate passwords for dynamic credentials.",
 			},
-			"use_microsoft_graph_api": &framework.FieldSchema{
-				Type:        framework.TypeBool,
-				Description: "Enable usage of the Microsoft Graph API over the deprecated Azure AD Graph API. Defaults to 'true'.",
-				Default:     true,
-			},
-			"root_password_ttl": &framework.FieldSchema{
+			"root_password_ttl": {
 				Type:        framework.TypeDurationSecond,
 				Default:     defaultRootPasswordTTL,
 				Description: "The TTL of the root password in Azure. This can be either a number of seconds or a time formatted duration (ex: 24h, 48ds)",
@@ -87,15 +87,27 @@ func pathConfig(b *azureSecretBackend) *framework.Path {
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.ReadOperation: &framework.PathOperation{
 				Callback: b.pathConfigRead,
+				DisplayAttrs: &framework.DisplayAttributes{
+					OperationSuffix: "configuration",
+				},
 			},
 			logical.CreateOperation: &framework.PathOperation{
 				Callback: b.pathConfigWrite,
+				DisplayAttrs: &framework.DisplayAttributes{
+					OperationVerb: "configure",
+				},
 			},
 			logical.UpdateOperation: &framework.PathOperation{
 				Callback: b.pathConfigWrite,
+				DisplayAttrs: &framework.DisplayAttributes{
+					OperationVerb: "configure",
+				},
 			},
 			logical.DeleteOperation: &framework.PathOperation{
 				Callback: b.pathConfigDelete,
+				DisplayAttrs: &framework.DisplayAttributes{
+					OperationSuffix: "configuration",
+				},
 			},
 		},
 		ExistenceCheck:  b.pathConfigExistenceCheck,
@@ -144,12 +156,6 @@ func (b *azureSecretBackend) pathConfigWrite(ctx context.Context, req *logical.R
 		config.ClientSecret = clientSecret.(string)
 	}
 
-	if useMsGraphApi, ok := data.GetOk("use_microsoft_graph_api"); ok {
-		config.UseMsGraphAPI = useMsGraphApi.(bool)
-	} else if req.Operation == logical.CreateOperation {
-		config.UseMsGraphAPI = data.Get("use_microsoft_graph_api").(bool)
-	}
-
 	config.PasswordPolicy = data.Get("password_policy").(string)
 
 	if rootExpirationRaw, ok := data.GetOk("root_password_ttl"); ok {
@@ -167,24 +173,7 @@ func (b *azureSecretBackend) pathConfigWrite(ctx context.Context, req *logical.R
 		return nil, err
 	}
 
-	resp := addAADWarning(nil, config)
-
-	return resp, nil
-}
-
-const aadWarning = "This configuration is using the Azure Active Directory API which is being " +
-	"removed soon. Please migrate to using the Microsoft Graph API using the " +
-	"use_microsoft_graph_api configuration parameter."
-
-func addAADWarning(resp *logical.Response, config *azureConfig) *logical.Response {
-	if config.UseMsGraphAPI {
-		return resp
-	}
-	if resp == nil {
-		resp = &logical.Response{}
-	}
-	resp.AddWarning(aadWarning)
-	return resp
+	return nil, err
 }
 
 func (b *azureSecretBackend) pathConfigRead(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
@@ -200,12 +189,11 @@ func (b *azureSecretBackend) pathConfigRead(ctx context.Context, req *logical.Re
 
 	resp := &logical.Response{
 		Data: map[string]interface{}{
-			"subscription_id":         config.SubscriptionID,
-			"tenant_id":               config.TenantID,
-			"environment":             config.Environment,
-			"client_id":               config.ClientID,
-			"use_microsoft_graph_api": config.UseMsGraphAPI,
-			"root_password_ttl":       int(config.RootPasswordTTL.Seconds()),
+			"subscription_id":   config.SubscriptionID,
+			"tenant_id":         config.TenantID,
+			"environment":       config.Environment,
+			"client_id":         config.ClientID,
+			"root_password_ttl": int(config.RootPasswordTTL.Seconds()),
 		},
 	}
 
@@ -213,7 +201,7 @@ func (b *azureSecretBackend) pathConfigRead(ctx context.Context, req *logical.Re
 		resp.Data["root_password_expiration_date"] = config.RootPasswordExpirationDate
 	}
 
-	return addAADWarning(resp, config), nil
+	return resp, nil
 }
 
 func (b *azureSecretBackend) pathConfigDelete(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {

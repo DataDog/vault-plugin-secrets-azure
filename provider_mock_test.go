@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package azuresecrets
 
 import (
@@ -19,6 +22,8 @@ import (
 type mockProvider struct {
 	subscriptionID            string
 	applications              map[string]bool
+	servicePrincipals         map[string]bool
+	deletedObjects            map[string]bool
 	passwords                 map[string]api.PasswordCredential
 	failNextCreateApplication bool
 	lock                      sync.Mutex
@@ -26,9 +31,11 @@ type mockProvider struct {
 
 func newMockProvider() api.AzureProvider {
 	return &mockProvider{
-		subscriptionID: generateUUID(),
-		applications:   make(map[string]bool),
-		passwords:      make(map[string]api.PasswordCredential),
+		subscriptionID:    generateUUID(),
+		applications:      make(map[string]bool),
+		servicePrincipals: make(map[string]bool),
+		deletedObjects:    make(map[string]bool),
+		passwords:         make(map[string]api.PasswordCredential),
 	}
 }
 
@@ -86,6 +93,12 @@ func (m *mockProvider) GetRoleDefinitionByID(_ context.Context, roleID string) (
 func (m *mockProvider) CreateServicePrincipal(_ context.Context, _ string, _ time.Time, _ time.Time) (spID string, password string, err error) {
 	id := generateUUID()
 	pass := generateUUID()
+
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	m.servicePrincipals[id] = true
+
 	return id, pass, nil
 }
 
@@ -125,8 +138,23 @@ func (m *mockProvider) ListApplications(_ context.Context, _ string) ([]api.Appl
 	}, nil
 }
 
-func (m *mockProvider) DeleteApplication(_ context.Context, applicationObjectID string) error {
+func (m *mockProvider) DeleteApplication(_ context.Context, applicationObjectID string, permanentlyDelete bool) error {
 	delete(m.applications, applicationObjectID)
+	m.deletedObjects[applicationObjectID] = true
+
+	if permanentlyDelete {
+		delete(m.deletedObjects, applicationObjectID)
+	}
+	return nil
+}
+
+func (m *mockProvider) DeleteServicePrincipal(_ context.Context, spObjectID string, permanentlyDelete bool) error {
+	delete(m.servicePrincipals, spObjectID)
+	m.deletedObjects[spObjectID] = true
+
+	if permanentlyDelete {
+		delete(m.deletedObjects, spObjectID)
+	}
 	return nil
 }
 
@@ -158,6 +186,10 @@ func (m *mockProvider) RemoveApplicationPassword(_ context.Context, _ string, ke
 	return nil
 }
 
+func (m *mockProvider) deletedObjectExists(s string) bool {
+	return m.deletedObjects[s]
+}
+
 func (m *mockProvider) appExists(s string) bool {
 	return m.applications[s]
 }
@@ -177,12 +209,12 @@ func (m *mockProvider) DeleteRoleAssignmentByID(_ context.Context, _ string) (au
 	return authorization.RoleAssignment{}, nil
 }
 
-// AddGroupMember adds a member to a AAD Group.
+// AddGroupMember adds a member to a Group.
 func (m *mockProvider) AddGroupMember(_ context.Context, _ string, _ string) error {
 	return nil
 }
 
-// RemoveGroupMember removes a member from a AAD Group.
+// RemoveGroupMember removes a member from a Group.
 func (m *mockProvider) RemoveGroupMember(_ context.Context, _ string, _ string) error {
 	return nil
 }
@@ -240,9 +272,11 @@ type errMockProvider struct {
 func newErrMockProvider() api.AzureProvider {
 	return &errMockProvider{
 		mockProvider: &mockProvider{
-			subscriptionID: generateUUID(),
-			applications:   make(map[string]bool),
-			passwords:      make(map[string]api.PasswordCredential),
+			subscriptionID:    generateUUID(),
+			applications:      make(map[string]bool),
+			servicePrincipals: make(map[string]bool),
+			deletedObjects:    make(map[string]bool),
+			passwords:         make(map[string]api.PasswordCredential),
 		},
 	}
 }

@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package azuresecrets
 
 import (
@@ -14,6 +17,11 @@ import (
 func pathRotateRoot(b *azureSecretBackend) *framework.Path {
 	return &framework.Path{
 		Pattern: "rotate-root",
+		DisplayAttrs: &framework.DisplayAttributes{
+			OperationPrefix: operationPrefixAzure,
+			OperationVerb:   "rotate",
+			OperationSuffix: "root",
+		},
 		Operations: map[logical.Operation]framework.OperationHandler{
 			logical.UpdateOperation: &framework.PathOperation{
 				Callback:                    b.pathRotateRoot,
@@ -102,7 +110,7 @@ func (b *azureSecretBackend) pathRotateRoot(ctx context.Context, req *logical.Re
 		b.Logger().Error("rotate root", "delete wal", err)
 	}
 
-	return addAADWarning(&logical.Response{}, config), nil
+	return nil, err
 }
 
 type passwordRemover interface {
@@ -120,23 +128,4 @@ func removeApplicationPasswords(ctx context.Context, passRemover passwordRemover
 	}
 
 	return merr.ErrorOrNil()
-}
-
-func intersectStrings(a []string, b []string) []string {
-	if len(a) == 0 || len(b) == 0 {
-		return []string{}
-	}
-
-	aMap := map[string]struct{}{}
-	for _, aStr := range a {
-		aMap[aStr] = struct{}{}
-	}
-
-	result := []string{}
-	for _, bStr := range b {
-		if _, exists := aMap[bStr]; exists {
-			result = append(result, bStr)
-		}
-	}
-	return result
 }

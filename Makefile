@@ -1,14 +1,15 @@
 TOOL?=vault-plugin-secrets-azure
 TEST?=$$(go list ./... | grep -v /vendor/)
 VETARGS?=-asmdecl -atomic -bool -buildtags -copylocks -methods -nilfunc -printf -rangeloops -shift -structtags -unsafeptr
-EXTERNAL_TOOLS=\
-	github.com/mitchellh/gox \
-	github.com/kardianos/govendor
+EXTERNAL_TOOLS=
 BUILD_TAGS?=${TOOL}
 GOFMT_FILES?=$$(find . -name '*.go' | grep -v vendor)
+PLUGIN_NAME := $(shell command ls cmd/)
+PLUGIN_DIR ?= $$GOPATH/vault-plugins
+PLUGIN_PATH ?= local-secrets-azure
 
 # Acceptance test variables
-WITH_DEV_PLUGIN?=
+WITH_DEV_PLUGIN?=1
 AZURE_TENANT_ID?=
 SKIP_TEARDOWN?=
 TESTS_OUT_FILE?=
@@ -43,11 +44,18 @@ test: fmtcheck generate
 		echo "ERROR: Set TEST to a specific package"; \
 		exit 1; \
 	fi
+	VAULT_ACC= go test -tags='$(BUILD_TAGS)' $(TEST) -v $(TESTARGS) -timeout 10m
+
+testacc: fmtcheck generate
+	@if [ "$(TEST)" = "./..." ]; then \
+		echo "ERROR: Set TEST to a specific package"; \
+		exit 1; \
+	fi
 	VAULT_ACC=1 go test -tags='$(BUILD_TAGS)' $(TEST) -v $(TESTARGS) -timeout 45m
 
 # test-acceptance runs all acceptance tests
 test-acceptance: $(if $(WITH_DEV_PLUGIN), dev-acceptance)
-	bats -f $(TESTS_FILTER) $(CURDIR)/tests/acceptance/basic.bats
+	 WITH_DEV_PLUGIN=$(WITH_DEV_PLUGIN) bats -f $(TESTS_FILTER) $(CURDIR)/tests/acceptance/basic.bats
 
 # generate runs `go generate` to build the dynamically generated
 # source files.
@@ -67,4 +75,16 @@ fmtcheck:
 fmt:
 	gofmt -w $(GOFMT_FILES)
 
-.PHONY: bin default generate test vet bootstrap fmt fmtcheck
+setup-env:
+	cd bootstrap/terraform && terraform init && terraform apply -auto-approve
+
+teardown-env:
+	cd bootstrap/terraform && terraform init && terraform destroy -auto-approve
+
+configure: dev
+	@./bootstrap/configure.sh \
+	$(PLUGIN_DIR) \
+	$(PLUGIN_NAME) \
+	$(PLUGIN_PATH)
+
+.PHONY: bin default generate test vet bootstrap fmt fmtcheck setup-env teardown-env configure

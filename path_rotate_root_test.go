@@ -1,9 +1,11 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package azuresecrets
 
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"testing"
 	"time"
 
@@ -149,95 +151,24 @@ func TestRotateRootPeroidicFunctionBeforeMinute(t *testing.T) {
 	}
 }
 
-func TestIntersectStrings(t *testing.T) {
-	type testCase struct {
-		a      []string
-		b      []string
-		expect []string
-	}
-
-	tests := map[string]testCase{
-		"nil slices": {
-			a:      nil,
-			b:      nil,
-			expect: []string{},
-		},
-		"a is nil": {
-			a:      nil,
-			b:      []string{"foo"},
-			expect: []string{},
-		},
-		"b is nil": {
-			a:      []string{"foo"},
-			b:      nil,
-			expect: []string{},
-		},
-		"a is empty": {
-			a:      []string{},
-			b:      []string{"foo"},
-			expect: []string{},
-		},
-		"b is empty": {
-			a:      []string{"foo"},
-			b:      []string{},
-			expect: []string{},
-		},
-		"a equals b": {
-			a:      []string{"foo"},
-			b:      []string{"foo"},
-			expect: []string{"foo"},
-		},
-		"a equals b (many)": {
-			a:      []string{"foo", "bar", "baz", "qux", "quux", "quuz"},
-			b:      []string{"foo", "bar", "baz", "qux", "quux", "quuz"},
-			expect: []string{"foo", "bar", "baz", "qux", "quux", "quuz"},
-		},
-		"a equals b but out of order": {
-			a:      []string{"foo", "bar", "baz", "qux", "quux", "quuz"},
-			b:      []string{"quuz", "bar", "qux", "foo", "quux", "baz"},
-			expect: []string{"quuz", "bar", "qux", "foo", "quux", "baz"},
-		},
-		"a is superset": {
-			a:      []string{"foo", "bar", "baz"},
-			b:      []string{"foo"},
-			expect: []string{"foo"},
-		},
-		"a is superset out of order": {
-			a:      []string{"bar", "foo", "baz"},
-			b:      []string{"foo"},
-			expect: []string{"foo"},
-		},
-		"b is superset": {
-			a:      []string{"foo"},
-			b:      []string{"foo", "bar", "baz"},
-			expect: []string{"foo"},
-		},
-		"b is superset out of order": {
-			a:      []string{"foo"},
-			b:      []string{"bar", "foo", "baz"},
-			expect: []string{"foo"},
-		},
-		"a not equal to b": {
-			a:      []string{"foo", "bar", "baz"},
-			b:      []string{"qux", "quux", "quuz"},
-			expect: []string{},
-		},
-	}
-
-	for name, test := range tests {
-		t.Run(name, func(t *testing.T) {
-			actual := intersectStrings(test.a, test.b)
-			if !reflect.DeepEqual(actual, test.expect) {
-				t.Fatalf("Actual: %#v\nExpected: %#v\n", actual, test.expect)
-			}
-		})
-	}
-}
-
 func assertNotNil(t *testing.T, val interface{}) {
 	t.Helper()
 	if val == nil {
 		t.Fatalf("expected not nil, but was nil")
+	}
+}
+
+func assertNotEmptyString(t *testing.T, str string) {
+	t.Helper()
+	if str == "" {
+		t.Fatalf("string is empty")
+	}
+}
+
+func assertStrSliceIsNotEmpty(t *testing.T, strs []string) {
+	t.Helper()
+	if strs == nil || len(strs) == 0 {
+		t.Fatalf("string slice is empty")
 	}
 }
 

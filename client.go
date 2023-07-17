@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package azuresecrets
 
 import (
@@ -5,17 +8,20 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/services/preview/authorization/mgmt/2018-01-01-preview/authorization"
+	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/azure"
 	"github.com/Azure/go-autorest/autorest/to"
-	multierror "github.com/hashicorp/go-multierror"
-	uuid "github.com/hashicorp/go-uuid"
-	"github.com/hashicorp/vault-plugin-secrets-azure/api"
+	"github.com/hashicorp/go-multierror"
+	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/vault/sdk/logical"
+
+	"github.com/hashicorp/vault-plugin-secrets-azure/api"
 )
 
 const (
@@ -50,6 +56,15 @@ func (c *client) createApp(ctx context.Context) (app *api.ApplicationResult, err
 	}
 
 	name = appNamePrefix + name
+
+	result, err := c.provider.CreateApplication(ctx, name)
+
+	return &result, err
+}
+
+func (c *client) createAppWithName(ctx context.Context, rolename string) (app *api.ApplicationResult, err error) {
+	intSuffix := fmt.Sprintf("%d", time.Now().Unix())
+	name := fmt.Sprintf("%s%s-%s", appNamePrefix, rolename, intSuffix)
 
 	result, err := c.provider.CreateApplication(ctx, name)
 
@@ -121,22 +136,45 @@ func (c *client) deleteAppPassword(ctx context.Context, appObjID, keyID string) 
 }
 
 // deleteApp deletes an Azure application.
-func (c *client) deleteApp(ctx context.Context, appObjectID string) error {
-	return c.provider.DeleteApplication(ctx, appObjectID)
+func (c *client) deleteApp(ctx context.Context, appObjectID string, permanentlyDelete bool) error {
+	return c.provider.DeleteApplication(ctx, appObjectID, permanentlyDelete)
 }
 
-// assignRoles assigns Azure roles to a service principal.
-func (c *client) assignRoles(ctx context.Context, spID string, roles []*AzureRole) ([]string, error) {
-	var ids []string
+// deleteServicePrincipal deletes an Azure service principal.
+func (c *client) deleteServicePrincipal(ctx context.Context, spObjectID string, permanentlyDelete bool) error {
+	return c.provider.DeleteServicePrincipal(ctx, spObjectID, permanentlyDelete)
+}
 
-	for _, role := range roles {
+// generateUUIDs pre-generates a list of UUIDs of a
+// certain length.
+func (c *client) generateUUIDs(length int) ([]string, error) {
+	var assignmentIDs []string
+
+	for i := 0; i < length; i++ {
 		assignmentID, err := uuid.GenerateUUID()
 		if err != nil {
 			return nil, err
 		}
+		assignmentIDs = append(assignmentIDs, assignmentID)
+	}
 
+	return assignmentIDs, nil
+}
+
+// assignRoles assigns Azure roles to a service principal.
+func (c *client) assignRoles(ctx context.Context, spID string, roles []*AzureRole, assignmentIDs []string) ([]string, error) {
+	var ids []string
+
+	if len(roles) != len(assignmentIDs) {
+		return nil, errors.New("number of Azure Roles and assignment IDs do not match")
+	}
+
+	for i, role := range roles {
 		resultRaw, err := retry(ctx, func() (interface{}, bool, error) {
-			ra, err := c.provider.CreateRoleAssignment(ctx, role.Scope, assignmentID,
+			if assignmentIDs[i] == "" {
+				return nil, true, fmt.Errorf("assignmentID at index %d was empty", i)
+			}
+			ra, err := c.provider.CreateRoleAssignment(ctx, role.Scope, assignmentIDs[i],
 				authorization.RoleAssignmentCreateParameters{
 					RoleAssignmentProperties: &authorization.RoleAssignmentProperties{
 						RoleDefinitionID: &role.RoleID,
@@ -171,6 +209,12 @@ func (c *client) unassignRoles(ctx context.Context, roleIDs []string) error {
 
 	for _, id := range roleIDs {
 		if _, err := c.provider.DeleteRoleAssignmentByID(ctx, id); err != nil {
+			detailedErr := new(autorest.DetailedError)
+			// If a role was deleted manually then Azure returns a error and status 204
+			if errors.As(err, detailedErr) && (detailedErr.StatusCode == http.StatusNoContent || detailedErr.StatusCode == http.StatusNotFound) {
+				continue
+			}
+
 			merr = multierror.Append(merr, fmt.Errorf("error unassigning role: %w", err))
 		}
 	}
@@ -208,7 +252,12 @@ func (c *client) removeGroupMemberships(ctx context.Context, servicePrincipalObj
 	var merr *multierror.Error
 
 	for _, id := range groupIDs {
-		if err := c.provider.RemoveGroupMember(ctx, servicePrincipalObjectID, id); err != nil {
+		if err := c.provider.RemoveGroupMember(ctx, id, servicePrincipalObjectID); err != nil {
+
+			// If a membership was deleted manually then Azure returns a error with a Status=404
+			if strings.Contains(err.Error(), "Status=404") {
+				continue
+			}
 			merr = multierror.Append(merr, fmt.Errorf("error removing group membership: %w", err))
 		}
 	}
@@ -285,7 +334,7 @@ func (b *azureSecretBackend) getClientSettings(ctx context.Context, config *azur
 
 	pluginEnv, err := b.System().PluginEnv(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("error loading plugin environment: %w", err)
+		return nil, fmt.Errorf("failed to read plugin environment: %w", err)
 	}
 	settings.PluginEnv = pluginEnv
 
@@ -294,9 +343,9 @@ func (b *azureSecretBackend) getClientSettings(ctx context.Context, config *azur
 
 // retry will repeatedly call f until one of:
 //
-//   * f returns true
-//   * the context is cancelled
-//   * 80 seconds elapses. Vault's default request timeout is 90s; we want to expire before then.
+//   - f returns true
+//   - the context is cancelled
+//   - 80 seconds elapses. Vault's default request timeout is 90s; we want to expire before then.
 //
 // Delays are random but will average 5 seconds.
 func retry(ctx context.Context, f func() (interface{}, bool, error)) (interface{}, error) {

@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package azuresecrets
 
 import (
@@ -39,6 +42,11 @@ func secretStaticServicePrincipal(b *azureSecretBackend) *framework.Secret {
 func pathServicePrincipal(b *azureSecretBackend) *framework.Path {
 	return &framework.Path{
 		Pattern: fmt.Sprintf("creds/%s", framework.GenericNameRegex("role")),
+		DisplayAttrs: &framework.DisplayAttributes{
+			OperationPrefix: operationPrefixAzure,
+			OperationVerb:   "request",
+			OperationSuffix: "service-principal-credentials",
+		},
 		Fields: map[string]*framework.FieldSchema{
 			"role": {
 				Type:        framework.TypeLowerCaseString,
@@ -90,7 +98,6 @@ func (b *azureSecretBackend) pathSPRead(ctx context.Context, req *logical.Reques
 
 	resp.Secret.TTL = role.TTL
 	resp.Secret.MaxTTL = role.MaxTTL
-
 	return resp, nil
 }
 
@@ -122,8 +129,24 @@ func (b *azureSecretBackend) createSPSecret(ctx context.Context, s logical.Stora
 		return nil, err
 	}
 
+	assignmentIDs, err := c.generateUUIDs(len(role.AzureRoles))
+	if err != nil {
+		return nil, fmt.Errorf("error generating assginment IDs; err=%w", err)
+	}
+
+	// Write a second WAL entry in case the Role assignments don't complete
+	rWALID, err := framework.PutWAL(ctx, s, walAppRoleAssignment, &walAppRoleAssign{
+		SpID:          spID,
+		AssignmentIDs: assignmentIDs,
+		AzureRoles:    role.AzureRoles,
+		Expiration:    time.Now().Add(maxWALAge),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error writing WAL: %w", err)
+	}
+
 	// Assign Azure roles to the new SP
-	raIDs, err := c.assignRoles(ctx, spID, role.AzureRoles)
+	raIDs, err := c.assignRoles(ctx, spID, role.AzureRoles, assignmentIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -133,9 +156,13 @@ func (b *azureSecretBackend) createSPSecret(ctx context.Context, s logical.Stora
 		return nil, err
 	}
 
-	// SP is fully created so delete the WAL
+	// SP is fully created so delete the WALs
 	if err := framework.DeleteWAL(ctx, s, walID); err != nil {
 		return nil, fmt.Errorf("error deleting WAL: %w", err)
+	}
+
+	if err := framework.DeleteWAL(ctx, s, rWALID); err != nil {
+		return nil, fmt.Errorf("error deleting role assignment WAL: %w", err)
 	}
 
 	data := map[string]interface{}{
@@ -148,6 +175,7 @@ func (b *azureSecretBackend) createSPSecret(ctx context.Context, s logical.Stora
 		"role_assignment_ids":  raIDs,
 		"group_membership_ids": groupObjectIDs(role.AzureGroups),
 		"role":                 roleName,
+		"permanently_delete":   role.PermanentlyDelete,
 	}
 
 	return b.Secret(SecretTypeSP).Response(data, internalData), nil
@@ -216,6 +244,13 @@ func (b *azureSecretBackend) spRevoke(ctx context.Context, req *logical.Request,
 		spObjectID = spObjectIDRaw.(string)
 	}
 
+	// Get the permanently delete setting. Only set if using dynamic service
+	// principals.
+	var permanentlyDelete bool
+	if permanentlyDeleteRaw, ok := req.Secret.InternalData["permanently_delete"]; ok {
+		permanentlyDelete = permanentlyDeleteRaw.(bool)
+	}
+
 	var raIDs []string
 	if req.Secret.InternalData["role_assignment_ids"] != nil {
 		for _, v := range req.Secret.InternalData["role_assignment_ids"].([]interface{}) {
@@ -252,8 +287,14 @@ func (b *azureSecretBackend) spRevoke(ctx context.Context, req *logical.Request,
 		resp.AddWarning(err.Error())
 	}
 
-	err = c.deleteApp(ctx, appObjectID)
+	// removing the service principal is effectively a garbage collection
+	// operation. Errors will be noted but won't fail the revocation process.
+	// Deleting the app, however, *is* required to consider the secret revoked.
+	if err := c.deleteServicePrincipal(ctx, spObjectID, permanentlyDelete); err != nil {
+		resp.AddWarning(err.Error())
+	}
 
+	err = c.deleteApp(ctx, appObjectID, permanentlyDelete)
 	return resp, err
 }
 
