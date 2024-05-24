@@ -488,16 +488,16 @@ func (c AppClient) ListGroups(ctx context.Context, filter string) ([]Group, erro
 	return groups, nil
 }
 
-func (c *AppClient) CreateServicePrincipal(ctx context.Context, appID string, startDate time.Time, endDate time.Time) (string, string, error) {
+func (c *AppClient) CreateServicePrincipal(ctx context.Context, appID string, startDate time.Time, endDate time.Time) (string, PasswordCredential, error) {
 	spID, err := c.createServicePrincipal(ctx, appID)
 	if err != nil {
-		return "", "", err
+		return "", PasswordCredential{}, err
 	}
-	password, err := c.setPasswordForServicePrincipal(ctx, spID, startDate, endDate)
+	password, err := c.AddPasswordForServicePrincipal(ctx, spID, startDate, endDate)
 	if err != nil {
 		dErr := c.deleteServicePrincipal(ctx, spID)
 		merr := multierror.Append(err, dErr)
-		return "", "", merr.ErrorOrNil()
+		return "", PasswordCredential{}, merr.ErrorOrNil()
 	}
 	return spID, password, nil
 }
@@ -525,7 +525,7 @@ func (c *AppClient) createServicePrincipal(ctx context.Context, appID string) (s
 	return respBody.ID, nil
 }
 
-func (c *AppClient) setPasswordForServicePrincipal(ctx context.Context, spID string, startDate time.Time, endDate time.Time) (string, error) {
+func (c *AppClient) AddPasswordForServicePrincipal(ctx context.Context, spID string, startDate time.Time, endDate time.Time) (PasswordCredential, error) {
 	pathParams := map[string]interface{}{
 		"id": spID,
 	}
@@ -546,9 +546,9 @@ func (c *AppClient) setPasswordForServicePrincipal(ctx context.Context, spID str
 		autorest.ByUnmarshallingJSON(&respBody),
 	)
 	if err != nil {
-		return "", err
+		return PasswordCredential{}, err
 	}
-	return *respBody.SecretText, nil
+	return respBody, nil
 }
 
 type createServicePrincipalResponse struct {
@@ -579,6 +579,50 @@ func (c *AppClient) deleteServicePrincipal(ctx context.Context, spID string) err
 	preparer := c.GetPreparer(
 		autorest.AsDelete(),
 		autorest.WithPathParameters("/v1.0/servicePrincipals/{id}", pathParams),
+	)
+
+	return c.SendRequest(ctx, preparer, autorest.WithErrorUnlessStatusCode(http.StatusOK, http.StatusNoContent))
+}
+
+type ServicePrincipalDetails struct {
+	Id                  string               `json:"id"`
+	PasswordCredentials []PasswordCredential `json:"passwordCredentials,omitempty"`
+}
+
+func (c *AppClient) GetServicePrincipal(ctx context.Context, spID string) (ServicePrincipalDetails, error) {
+	pathParams := map[string]interface{}{
+		"id": spID,
+	}
+
+	preparer := c.GetPreparer(
+		autorest.AsGet(),
+		autorest.WithPathParameters("/v1.0/servicePrincipals/{id}", pathParams),
+	)
+
+	respBody := ServicePrincipalDetails{}
+	err := c.SendRequest(ctx, preparer,
+		autorest.WithErrorUnlessStatusCode(http.StatusOK, http.StatusOK),
+		autorest.ByUnmarshallingJSON(&respBody),
+	)
+	if err != nil {
+		return ServicePrincipalDetails{}, err
+	}
+
+	return respBody, nil
+}
+
+func (c *AppClient) RemovePasswordForServicePrincipal(ctx context.Context, spID, keyID string) error {
+	pathParams := map[string]interface{}{
+		"id": spID,
+	}
+	reqBody := map[string]interface{}{
+		"keyId": keyID,
+	}
+
+	preparer := c.GetPreparer(
+		autorest.AsPost(),
+		autorest.WithPathParameters("/v1.0/servicePrincipals/{id}/removePassword", pathParams),
+		autorest.WithJSON(reqBody),
 	)
 
 	return c.SendRequest(ctx, preparer, autorest.WithErrorUnlessStatusCode(http.StatusOK, http.StatusNoContent))

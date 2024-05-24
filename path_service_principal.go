@@ -184,11 +184,23 @@ func (b *azureSecretBackend) createSPSecret(ctx context.Context, s logical.Stora
 		return "", err
 	}
 
+	var pwExpiresAt time.Time
+	if password.EndDate != nil {
+		pwExpiresAt = password.EndDate.ToTime()
+	}
+
+	var keyID string
+	if password.KeyID != nil {
+		keyID = *password.KeyID
+	}
+
 	role.ApplicationID = appID
 	role.ApplicationObjectID = appObjID
 	role.ServicePrincipalID = spID
 	role.Credentials = &ClientCredentials{
-		Password: password,
+		KeyId:     keyID,
+		Password:  *password.SecretText,
+		ExpiresAt: pwExpiresAt,
 	}
 
 	return walID, nil

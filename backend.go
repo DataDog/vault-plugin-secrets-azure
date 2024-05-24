@@ -14,6 +14,11 @@ import (
 	"github.com/hashicorp/vault/sdk/logical"
 )
 
+const (
+	spCredCheckCooldown = time.Hour * 2
+	spCredsRfreshBuffer = time.Hour * 24 * 7 // one week
+)
+
 type azureSecretBackend struct {
 	*framework.Backend
 
@@ -26,6 +31,8 @@ type azureSecretBackend struct {
 	// operation that must be locked per Application Object ID.
 	appLocks       []*locksutil.LockEntry
 	updatePassword bool
+
+	nextSPCredCheck time.Time
 }
 
 func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
@@ -157,9 +164,124 @@ func (b *azureSecretBackend) periodicFunc(ctx context.Context, sys *logical.Requ
 		}
 
 		b.updatePassword = false
+
+		if b.nextSPCredCheck.IsZero() || !time.Now().Before(b.nextSPCredCheck) {
+			err = b.refreshSPCredentials(ctx, sys.Storage)
+			if err != nil {
+				return err
+			}
+
+			// Update the time at which to run the cred check again.
+			b.nextSPCredCheck = time.Now().Add(spCredCheckCooldown)
+		}
 	}
 
 	return nil
+}
+
+func (b *azureSecretBackend) refreshSPCredentials(ctx context.Context, storage logical.Storage) error {
+	roleNames, err := storage.List(ctx, rolesStoragePath+"/")
+	if err != nil {
+		return fmt.Errorf("error listing roles: %w", err)
+	}
+
+	expirationCutoff := time.Now().Add(spCredsRfreshBuffer)
+	for _, roleName := range roleNames {
+		err = b.refreshSPCredentialsForRole(ctx, storage, roleName, expirationCutoff)
+		if err != nil {
+			b.Logger().Error("failed to refresh service principal credentials for role", "role", roleName, "error", err)
+		}
+	}
+
+	return nil
+}
+
+func (b *azureSecretBackend) refreshSPCredentialsForRole(ctx context.Context, storage logical.Storage, roleName string, expirationCutoff time.Time) error {
+	lock := locksutil.LockForKey(b.appLocks, roleName)
+	lock.Lock()
+	defer lock.Unlock()
+
+	role, err := getRole(ctx, roleName, storage)
+	if err != nil {
+		return fmt.Errorf("failed to get role %q: %w", roleName, err)
+	}
+
+	if role.ApplicationType != applicationTypeDynamic {
+		return nil
+	} else if role.Credentials == nil {
+		// This should be impossible
+		return fmt.Errorf("dynamic application role missing credentials. role: %s", roleName)
+	}
+
+	if role.Credentials.ExpiresAt.After(expirationCutoff) {
+		return nil
+	}
+
+	servicePrincipal, err := b.client.getSP(ctx, role.ServicePrincipalID)
+	if err != nil {
+		return fmt.Errorf("error getting service principal: %w", err)
+	}
+
+	// we don't have the keyID and the service principal has a single password that hasn't expired, so we assume that is the
+	// password we are currently using and update the role.
+	if role.Credentials.KeyId == "" && len(servicePrincipal.PasswordCredentials) == 1 && servicePrincipal.PasswordCredentials[0].EndDate.After(expirationCutoff) {
+		cred := servicePrincipal.PasswordCredentials[0]
+		role.Credentials.KeyId = *cred.KeyID
+		role.Credentials.ExpiresAt = cred.EndDate.ToTime()
+
+		err = saveRole(ctx, storage, role, roleName)
+		if err != nil {
+			return fmt.Errorf("failed to save role %q: %w", roleName, err)
+		}
+		return nil
+	}
+
+	currPassword, ok := findPasswordWithID(role.Credentials.KeyId, servicePrincipal.PasswordCredentials)
+	if !ok || currPassword.EndDate.Before(expirationCutoff) {
+		// we don't know what password we are using or it is expiring so refresh it
+
+		newPassword, err := b.client.addSPPassword(ctx, role.ServicePrincipalID, spExpiration)
+		if err != nil {
+			return fmt.Errorf("failed to add new service principal password for role %q: %w", roleName, err)
+		}
+
+		role.Credentials = &ClientCredentials{
+			KeyId:     *newPassword.KeyID,
+			Password:  *newPassword.SecretText,
+			ExpiresAt: newPassword.EndDate.ToTime(),
+		}
+		err = saveRole(ctx, storage, role, roleName)
+		if err != nil {
+			// try to remove the new password
+			err = b.client.removeSPPassword(ctx, role.ServicePrincipalID, *newPassword.KeyID)
+			if err != nil {
+				b.Logger().Warn("failed to remove new password for role", "role", roleName, "error", err)
+			}
+			return fmt.Errorf("failed to save role %q: %w", roleName, err)
+		}
+
+		// remove all expired passwords
+		now := time.Now()
+		for _, pw := range servicePrincipal.PasswordCredentials {
+			if pw.EndDate.Before(now) {
+				err = b.client.removeSPPassword(ctx, role.ServicePrincipalID, *pw.KeyID)
+				if err != nil {
+					b.Logger().Warn("failed to remove old password for role", "role", roleName, "error", err)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func findPasswordWithID(keyID string, passwords []api.PasswordCredential) (api.PasswordCredential, bool) {
+	for _, password := range passwords {
+		if *password.KeyID == keyID {
+			return password, true
+		}
+	}
+	return api.PasswordCredential{}, false
 }
 
 // reset clears the backend's cached client

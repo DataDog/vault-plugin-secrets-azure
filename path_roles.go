@@ -46,8 +46,9 @@ type roleEntry struct {
 }
 
 type ClientCredentials struct {
-	KeyId    string `json:"key_id"`
-	Password string `json:"password"`
+	KeyId     string    `json:"key_id"`
+	Password  string    `json:"password"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 // AzureRole is an Azure Role (https://docs.microsoft.com/en-us/azure/role-based-access-control/overview) applied

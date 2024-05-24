@@ -96,16 +96,33 @@ func (m *mockProvider) GetRoleDefinitionByID(_ context.Context, roleID string) (
 	return d, nil
 }
 
-func (m *mockProvider) CreateServicePrincipal(_ context.Context, _ string, _ time.Time, _ time.Time) (spID string, password string, err error) {
+func (m *mockProvider) CreateServicePrincipal(_ context.Context, _ string, startTime time.Time, endTime time.Time) (spID string, password api.PasswordCredential, err error) {
 	id := generateUUID()
 	pass := generateUUID()
+
+	keyID := generateUUID()
 
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
 	m.servicePrincipals[id] = true
 
-	return id, pass, nil
+	return id, api.PasswordCredential{KeyID: &keyID, SecretText: &pass, StartDate: &date.Time{startTime}, EndDate: &date.Time{endTime}}, nil
+}
+
+func (m *mockProvider) GetServicePrincipal(_ context.Context, spID string) (api.ServicePrincipalDetails, error) {
+	return api.ServicePrincipalDetails{Id: spID, PasswordCredentials: make([]api.PasswordCredential, 0)}, nil
+}
+
+func (m *mockProvider) RemovePasswordForServicePrincipal(ctx context.Context, spID, keyID string) error {
+	return nil
+}
+
+func (m *mockProvider) AddPasswordForServicePrincipal(ctx context.Context, spID string, startDate time.Time, endDate time.Time) (api.PasswordCredential, error) {
+	id := generateUUID()
+	pass := generateUUID()
+
+	return api.PasswordCredential{KeyID: &id, SecretText: &pass}, nil
 }
 
 func (m *mockProvider) CreateApplication(_ context.Context, _ string) (api.ApplicationResult, error) {
