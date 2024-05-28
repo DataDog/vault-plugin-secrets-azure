@@ -530,8 +530,10 @@ func (c *AppClient) AddPasswordForServicePrincipal(ctx context.Context, spID str
 		"id": spID,
 	}
 	reqBody := map[string]interface{}{
-		"startDateTime": startDate.UTC().Format("2006-01-02T15:04:05Z"),
-		"endDateTime":   endDate.UTC().Format("2006-01-02T15:04:05Z"),
+		"passwordCredential": PasswordCredential{
+			StartDate: &date.Time{Time: startDate},
+			EndDate:   &date.Time{Time: endDate},
+		},
 	}
 
 	preparer := c.GetPreparer(
