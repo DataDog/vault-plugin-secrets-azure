@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	spCredCheckCooldown = time.Hour * 4
-	spCredsRfreshBuffer = time.Hour * 24 * 7 // one week
+	spCredCheckCooldown  = time.Hour * 4
+	spCredsRefreshBuffer = time.Hour * 24 * 7 // one week
 )
 
 type azureSecretBackend struct {
@@ -201,7 +201,7 @@ func (b *azureSecretBackend) refreshSPCredentials(ctx context.Context, storage l
 
 	b.Logger().Debug("listed roles", "roles", roleNames)
 
-	expirationCutoff := time.Now().Add(spCredsRfreshBuffer)
+	expirationCutoff := time.Now().Add(spCredsRefreshBuffer)
 	for _, roleName := range roleNames {
 		err = b.refreshSPCredentialsForRole(ctx, storage, roleName, expirationCutoff)
 		if err != nil {

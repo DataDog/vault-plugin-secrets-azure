@@ -603,7 +603,7 @@ func (c *AppClient) GetServicePrincipal(ctx context.Context, spID string) (Servi
 
 	respBody := ServicePrincipalDetails{}
 	err := c.SendRequest(ctx, preparer,
-		autorest.WithErrorUnlessStatusCode(http.StatusOK, http.StatusOK),
+		autorest.WithErrorUnlessStatusCode(http.StatusOK),
 		autorest.ByUnmarshallingJSON(&respBody),
 	)
 	if err != nil {
