@@ -199,8 +199,6 @@ func (b *azureSecretBackend) refreshSPCredentials(ctx context.Context, storage l
 		return fmt.Errorf("error listing roles: %w", err)
 	}
 
-	b.Logger().Debug("listed roles", "roles", roleNames)
-
 	expirationCutoff := time.Now().Add(spCredsRefreshBuffer)
 	for _, roleName := range roleNames {
 		err = b.refreshSPCredentialsForRole(ctx, storage, roleName, expirationCutoff)
