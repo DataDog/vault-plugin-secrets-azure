@@ -60,11 +60,11 @@ func (c *client) createApp(ctx context.Context) (app *api.ApplicationResult, err
 func (c *client) createSP(
 	ctx context.Context,
 	app *api.ApplicationResult,
-	duration time.Duration) (spID string, password string, err error) {
+	duration time.Duration) (spID string, password api.PasswordCredential, err error) {
 
 	type idPass struct {
 		ID       string
-		Password string
+		Password api.PasswordCredential
 	}
 
 	resultRaw, err := retry(ctx, func() (interface{}, bool, error) {
@@ -85,12 +85,25 @@ func (c *client) createSP(
 	})
 
 	if err != nil {
-		return "", "", fmt.Errorf("error creating service principal: %w", err)
+		return "", api.PasswordCredential{}, fmt.Errorf("error creating service principal: %w", err)
 	}
 
 	result := resultRaw.(idPass)
 
 	return result.ID, result.Password, nil
+}
+
+func (c *client) getSP(ctx context.Context, spID string) (api.ServicePrincipalDetails, error) {
+	return c.provider.GetServicePrincipal(ctx, spID)
+}
+
+func (c *client) addSPPassword(ctx context.Context, spID string, duration time.Duration) (api.PasswordCredential, error) {
+	now := time.Now()
+	return c.provider.AddPasswordForServicePrincipal(ctx, spID, now, now.Add(duration))
+}
+
+func (c *client) removeSPPassword(ctx context.Context, spID, keyID string) error {
+	return c.provider.RemovePasswordForServicePrincipal(ctx, spID, keyID)
 }
 
 // addAppPassword adds a new password to an App's credentials list.

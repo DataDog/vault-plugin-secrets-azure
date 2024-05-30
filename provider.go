@@ -138,12 +138,24 @@ func (p *provider) RemoveApplicationPassword(ctx context.Context, applicationObj
 
 // CreateServicePrincipal creates a new Azure service principal.
 // An Application must be created prior to calling this and pass in parameters.
-func (p *provider) CreateServicePrincipal(ctx context.Context, appID string, startDate time.Time, endDate time.Time) (id string, password string, err error) {
+func (p *provider) CreateServicePrincipal(ctx context.Context, appID string, startDate time.Time, endDate time.Time) (id string, credential api.PasswordCredential, err error) {
 	return p.spClient.CreateServicePrincipal(ctx, appID, startDate, endDate)
 }
 
 func (p *provider) DeleteServicePrincipal(ctx context.Context, spObjectID string, permanentlyDelete bool) error {
 	return p.spClient.DeleteServicePrincipal(ctx, spObjectID, permanentlyDelete)
+}
+
+func (p *provider) GetServicePrincipal(ctx context.Context, spID string) (api.ServicePrincipalDetails, error) {
+	return p.spClient.GetServicePrincipal(ctx, spID)
+}
+
+func (p *provider) AddPasswordForServicePrincipal(ctx context.Context, spID string, startDate time.Time, endDate time.Time) (api.PasswordCredential, error) {
+	return p.spClient.AddPasswordForServicePrincipal(ctx, spID, startDate, endDate)
+}
+
+func (p *provider) RemovePasswordForServicePrincipal(ctx context.Context, spID, keyID string) error {
+	return p.spClient.RemovePasswordForServicePrincipal(ctx, spID, keyID)
 }
 
 // ListRoles like all Azure roles with a scope (often subscription).
