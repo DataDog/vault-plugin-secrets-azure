@@ -133,7 +133,6 @@ func (b *azureSecretBackend) rollbackRoleAssignWAL(ctx context.Context, req *log
 
 	// Return if there aren't any roles to unassign
 	if entry.AzureRoles == nil || len(entry.AzureRoles) < 1 {
-		b.Logger().Error("no azure roles associated with role")
 		return nil
 	}
 

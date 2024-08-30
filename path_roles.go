@@ -365,37 +365,40 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 			}
 		}
 
-		// Pre-generate UUIDs to be provided to assignRoles so we can rollback if we need to
-		var assignmentIDs []string
+		var rWALID string
+		if len(requestedRoles) > 0 {
+			// Pre-generate UUIDs to be provided to assignRoles so we can rollback if we need to
+			var assignmentIDs []string
 
-		for i := 0; i < len(requestedRoles); i++ {
-			assignmentID, err := uuid.GenerateUUID()
+			for i := 0; i < len(requestedRoles); i++ {
+				assignmentID, err := uuid.GenerateUUID()
+				if err != nil {
+					return nil, err
+				}
+				assignmentIDs = append(assignmentIDs, assignmentID)
+			}
+
+			// Write a second WAL entry in case the Role assignments don't complete
+			rWALID, err = framework.PutWAL(ctx, req.Storage, walAppRoleAssignment, &walAppRoleAssign{
+				SpID:          role.ServicePrincipalID,
+				AssignmentIDs: assignmentIDs,
+				AzureRoles:    requestedRoles,
+				Expiration:    time.Now().Add(maxWALAge),
+			})
+			if err != nil {
+				return nil, fmt.Errorf("error writing WAL: %w", err)
+			}
+
+			err, warn := b.configureRoles(ctx, client, role, requestedRoles, assignmentIDs)
 			if err != nil {
 				return nil, err
 			}
-			assignmentIDs = append(assignmentIDs, assignmentID)
+			if warn != nil {
+				resp.AddWarning(warn.Error())
+			}
 		}
 
-		// Write a second WAL entry in case the Role assignments don't complete
-		rWALID, err := framework.PutWAL(ctx, req.Storage, walAppRoleAssignment, &walAppRoleAssign{
-			SpID:          role.ServicePrincipalID,
-			AssignmentIDs: assignmentIDs,
-			AzureRoles:    requestedRoles,
-			Expiration:    time.Now().Add(maxWALAge),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("error writing WAL: %w", err)
-		}
-
-		err, warn := b.configureRoles(ctx, client, role, requestedRoles, assignmentIDs)
-		if err != nil {
-			return nil, err
-		}
-		if warn != nil {
-			resp.AddWarning(warn.Error())
-		}
-
-		err, warn = b.configureGroups(ctx, client, role, requestedGroups)
+		err, warn := b.configureGroups(ctx, client, role, requestedGroups)
 		if err != nil {
 			return nil, err
 		}
@@ -410,8 +413,10 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 			}
 		}
 
-		if err := framework.DeleteWAL(ctx, req.Storage, rWALID); err != nil {
-			return nil, fmt.Errorf("error deleting role assignment WAL: %w", err)
+		if rWALID != "" {
+			if err := framework.DeleteWAL(ctx, req.Storage, rWALID); err != nil {
+				return nil, fmt.Errorf("error deleting role assignment WAL: %w", err)
+			}
 		}
 	} else if role.ApplicationType == applicationTypeStatic {
 		if role.Credentials == nil {
