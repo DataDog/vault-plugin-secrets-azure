@@ -356,6 +356,27 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 	}
 
 	if role.ApplicationType == applicationTypeDynamic {
+
+		if len(role.AzureGroups) > 0 {
+			// remove any non-existent groups from the current role groups
+			existingGroups := make([]*AzureGroup, 0)
+			for _, group := range role.AzureGroups {
+				if group.ObjectID != "" {
+					_, err := client.provider.GetGroup(ctx, group.ObjectID)
+					if err != nil {
+						// do nothing if the group no longer exists and return an error for any
+						// other errors.
+						if !strings.Contains(err.Error(), "Request_ResourceNotFound") {
+							return nil, fmt.Errorf("unable to lookup Azure group: %w", err)
+						}
+					} else {
+						existingGroups = append(existingGroups, group)
+					}
+				}
+			}
+			role.AzureGroups = existingGroups
+		}
+
 		walID := ""
 		if role.Credentials == nil {
 			var err error
@@ -365,26 +386,28 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 			}
 		}
 
+		var rWALID string
 		// Pre-generate UUIDs to be provided to assignRoles so we can rollback if we need to
 		var assignmentIDs []string
-
-		for i := 0; i < len(requestedRoles); i++ {
-			assignmentID, err := uuid.GenerateUUID()
-			if err != nil {
-				return nil, err
+		if len(requestedRoles) > 0 {
+			for i := 0; i < len(requestedRoles); i++ {
+				assignmentID, err := uuid.GenerateUUID()
+				if err != nil {
+					return nil, err
+				}
+				assignmentIDs = append(assignmentIDs, assignmentID)
 			}
-			assignmentIDs = append(assignmentIDs, assignmentID)
-		}
 
-		// Write a second WAL entry in case the Role assignments don't complete
-		rWALID, err := framework.PutWAL(ctx, req.Storage, walAppRoleAssignment, &walAppRoleAssign{
-			SpID:          role.ServicePrincipalID,
-			AssignmentIDs: assignmentIDs,
-			AzureRoles:    requestedRoles,
-			Expiration:    time.Now().Add(maxWALAge),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("error writing WAL: %w", err)
+			// Write a second WAL entry in case the Role assignments don't complete
+			rWALID, err = framework.PutWAL(ctx, req.Storage, walAppRoleAssignment, &walAppRoleAssign{
+				SpID:          role.ServicePrincipalID,
+				AssignmentIDs: assignmentIDs,
+				AzureRoles:    requestedRoles,
+				Expiration:    time.Now().Add(maxWALAge),
+			})
+			if err != nil {
+				return nil, fmt.Errorf("error writing WAL: %w", err)
+			}
 		}
 
 		err, warn := b.configureRoles(ctx, client, role, requestedRoles, assignmentIDs)
@@ -397,7 +420,7 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 
 		err, warn = b.configureGroups(ctx, client, role, requestedGroups)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("error configuring groups: %w", err)
 		}
 		if warn != nil {
 			resp.AddWarning(warn.Error())
@@ -410,8 +433,10 @@ func (b *azureSecretBackend) pathRoleUpdate(ctx context.Context, req *logical.Re
 			}
 		}
 
-		if err := framework.DeleteWAL(ctx, req.Storage, rWALID); err != nil {
-			return nil, fmt.Errorf("error deleting role assignment WAL: %w", err)
+		if rWALID != "" {
+			if err := framework.DeleteWAL(ctx, req.Storage, rWALID); err != nil {
+				return nil, fmt.Errorf("error deleting role assignment WAL: %w", err)
+			}
 		}
 	} else if role.ApplicationType == applicationTypeStatic {
 		if role.Credentials == nil {
@@ -604,16 +629,17 @@ func getRole(ctx context.Context, name string, s logical.Storage) (*roleEntry, e
 	return role, nil
 }
 
+// groupSetDifference returns all groups in set "a" whos ID is not present in set "b".
 func groupSetDifference(a []*AzureGroup, b []*AzureGroup) []*AzureGroup {
 	difference := []*AzureGroup{}
 
-	m := make(map[AzureGroup]bool)
+	m := make(map[string]bool)
 	for _, bVal := range b {
-		m[*bVal] = true
+		m[bVal.ObjectID] = true
 	}
 
 	for _, aVal := range a {
-		if _, ok := m[*aVal]; !ok {
+		if _, ok := m[aVal.ObjectID]; !ok {
 			difference = append(difference, aVal)
 		}
 	}
@@ -621,6 +647,7 @@ func groupSetDifference(a []*AzureGroup, b []*AzureGroup) []*AzureGroup {
 	return difference
 }
 
+// roleSetDifference returns all roles in set "a" that are not in set "b". Compares all fields.
 func roleSetDifference(a []*AzureRole, b []*AzureRole) []*AzureRole {
 	difference := []*AzureRole{}
 

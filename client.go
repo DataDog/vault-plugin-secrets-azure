@@ -205,8 +205,14 @@ func (c *client) addGroupMemberships(ctx context.Context, spID string, groups []
 		_, err := retry(ctx, func() (interface{}, bool, error) {
 			err := c.provider.AddGroupMember(ctx, group.ObjectID, spID)
 
-			// Propagation delays within Azure can cause this error occasionally, so don't quit on it.
-			if err != nil && strings.Contains(err.Error(), "Request_ResourceNotFound") {
+			/*
+			   "ResourceNotFound" - Propagation delays within Azure can cause this error occasionally, so don't quit on it.
+			   "object references already exist" - the service principal is already a member of the group, nothing to do.
+			           example error:
+			               autorest/azure: Service returned an error. Status=400 Code="Request_BadRequest"
+			               Message="One or more added object references already exist for the following modified properties: 'members'
+			*/
+			if err != nil && (strings.Contains(err.Error(), "Request_ResourceNotFound") || strings.Contains(err.Error(), "object references already exist")) {
 				return nil, false, nil
 			}
 
